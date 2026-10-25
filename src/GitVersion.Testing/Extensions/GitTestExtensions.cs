@@ -1,0 +1,121 @@
+using GitVersion.Helpers;
+using GitVersion.Testing.Internal;
+using LibGit2Sharp;
+
+namespace GitVersion.Testing.Extensions;
+
+public static class GitTestExtensions
+{
+    private static int _pad = 1;
+
+    extension(IRepository repository)
+    {
+        public Commit MakeACommit(string? commitMessage = null) => CreateFileAndCommit(repository, Guid.NewGuid().ToString(), commitMessage);
+        public void MergeNoFF(string branch) => MergeNoFF(repository, branch, Generate.SignatureNow());
+
+        public Commit MergeNoFF(string branch, string message)
+        {
+            repository.MergeNoFF(branch);
+            var signature = Generate.SignatureNow();
+            return repository.Commit(message, signature, signature, new CommitOptions { AmendPreviousCommit = true });
+        }
+
+        public void MergeNoFF(string branch, Signature sig) => repository.Merge(repository.Branches[branch], sig, new MergeOptions
+        {
+            FastForwardStrategy = FastForwardStrategy.NoFastForward
+        });
+
+        public Commit[] MakeCommits(int numCommitsToMake)
+            => [.. Enumerable.Range(1, numCommitsToMake).Select(_ => repository.MakeACommit())];
+
+        private Commit CreateFileAndCommit(string relativeFileName, string? commitMessage = null)
+        {
+            var randomFile = FileSystemHelper.Path.Combine(repository.Info.WorkingDirectory, relativeFileName);
+            if (FileSystemHelper.File.Exists(randomFile))
+            {
+                FileSystemHelper.File.Delete(randomFile);
+            }
+
+            var totalWidth = 36 + (_pad++ % 10);
+            var contents = Guid.NewGuid().ToString().PadRight(totalWidth, '.');
+            FileSystemHelper.File.WriteAllText(randomFile, contents);
+
+            Commands.Stage(repository, randomFile);
+
+            return repository.Commit(commitMessage ?? $"Test Commit for file '{relativeFileName}'",
+                Generate.SignatureNow(), Generate.SignatureNow());
+        }
+
+        public Tag MakeATaggedCommit(string tag)
+        {
+            var commit = repository.MakeACommit();
+            var existingTag = repository.Tags.SingleOrDefault(t => t.FriendlyName == tag);
+            return existingTag ?? repository.Tags.Add(tag, commit);
+        }
+
+        public Commit CreatePullRequestRef(string from, string to, int prNumber = 2, bool normalise = false, bool allowFastForwardMerge = false)
+        {
+            Commands.Checkout(repository, repository.Branches[to].Tip);
+            if (allowFastForwardMerge)
+            {
+                repository.Merge(repository.Branches[from], Generate.SignatureNow());
+            }
+            else
+            {
+                repository.MergeNoFF(from);
+            }
+            var commit = repository.Head.Tip;
+            repository.Refs.Add("refs/pull/" + prNumber + "/merge", commit.Id);
+            Commands.Checkout(repository, to);
+            if (normalise)
+            {
+                // Turn the ref into a real branch
+                Commands.Checkout(repository, repository.Branches.Add("pull/" + prNumber + "/merge", commit));
+            }
+
+            return commit;
+        }
+    }
+
+    public static void ExecuteGitCmd(string gitCmd, string workingDirectory, Action<string>? writer = null)
+    {
+        var output = new StringBuilder();
+        var outputLock = new System.Threading.Lock();
+        try
+        {
+            ProcessHelper.Run(
+                o =>
+                {
+                    lock (outputLock)
+                    {
+                        output.AppendLine(o);
+                    }
+                },
+                e =>
+                {
+                    lock (outputLock)
+                    {
+                        output.AppendLineFormat("ERROR: {0}", e);
+                    }
+                },
+                null,
+                "git",
+                gitCmd,
+                workingDirectory);
+        }
+        catch (FileNotFoundException exception) when (exception.FileName == "git")
+        {
+            output.AppendLine("Could not execute 'git log' due to the following error:");
+            output.AppendLine(exception.ToString());
+        }
+
+        if (writer != null)
+        {
+            writer(output.ToString());
+        }
+        else
+        {
+            Console.Write(output.ToString());
+        }
+    }
+}

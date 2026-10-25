@@ -1,0 +1,26 @@
+---
+Title: CI integrations
+Order: 3000
+Description: Prepare a checkout and use GitVersion in your build pipeline.
+RedirectFrom:
+- docs/build-server-support
+- docs/build-server-support/build-server
+- docs/build-server-support/build-server/index.html
+- docs/build-server-support/build-server-support
+- docs/build-server-support/index.html
+---
+<p>Calculate a version for the intended commit, then pass its values to packaging and deployment steps.</p>
+<h2>Prepare the checkout</h2>
+<ol><li>Check out the commit you intend to version.</li><li>Fetch the tags and branch history required by your workflow. Start with an unshallow checkout; for GitHub Actions, set <code>fetch-depth: 0</code>.</li><li>Include your configuration file.</li><li>Follow the provider guide for branch detection, pull requests, and variable scope.</li></ol>
+<p>See <a href="/docs/reference/requirements">repository requirements</a> and <a href="/docs/learn/faq">Troubleshooting</a> if CI produces a different result from your local checkout.</p>
+<h2>Choose your integration</h2>
+<p>Start with <a href="/docs/reference/build-servers/github-actions">GitHub Actions</a>, <a href="/docs/reference/build-servers/azure-devops">Azure DevOps</a>, or <a href="/docs/reference/build-servers/gitlab">GitLab CI</a>, or choose another provider below.</p>
+@Html.Partial("_ChildPages")
+<h2>Build Server Variables</h2>
+<p>Run <code>dotnet-gitversion --output buildserver</code> to use a supported provider's native variable and build-number mechanisms. Dedicated GitTools integrations can perform these steps for you. Check the provider guide for exact variable names and how to pass them to later jobs.</p>
+<h2>MSBuild Properties</h2>
+<p>The <a href="/docs/usage/msbuild">MSBuild task</a> exposes properties such as <code>$(GitVersion_SemVer)</code>. See that guide for assembly and package integration.</p>
+<h2>Environment Variables</h2>
+<p>Provider integrations commonly expose values such as <code>GitVersion_SemVer</code>. Export mechanisms and scope differ between providers. For portable scripts, use <a href="/docs/usage/cli/output">JSON or dotenv output</a> and explicitly pass the resulting file to downstream jobs.</p>
+<h2>Normalization</h2>
+<p>GitVersion can normalize repository references when a build server is detected. The <code>--no-normalize</code> option disables that step; it does not supply missing references. Follow provider-specific checkout guidance before changing this behavior.</p>

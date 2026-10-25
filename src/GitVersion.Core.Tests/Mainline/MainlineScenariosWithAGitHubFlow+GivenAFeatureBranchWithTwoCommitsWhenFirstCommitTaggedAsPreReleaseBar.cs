@@ -1,0 +1,63 @@
+using GitVersion.Configuration;
+using GitVersion.VersionCalculation;
+
+namespace GitVersion.Tests.Mainline;
+
+internal partial class MainlineScenariosWithAGitHubFlow
+{
+    [Parallelizable(ParallelScope.All)]
+    public class GivenAFeatureBranchWithTwoCommitsWhenFirstCommitTaggedAsPreReleaseBar
+    {
+        private EmptyRepositoryFixture? fixture;
+
+        private static GitHubFlowConfigurationBuilder MainlineBuilder => GitHubFlowConfigurationBuilder.New
+            .WithVersionStrategy(VersionStrategies.Mainline).WithLabel(null)
+            .WithBranch("feature", b => b
+                .WithDeploymentMode(DeploymentMode.ManualDeployment).WithPreventIncrementWhenCurrentCommitTagged(true)
+            );
+
+        [OneTimeSetUp]
+        public void OneTimeSetUp()
+        {
+            // B 58 minutes ago (HEAD -> feature/foo)
+            // A 59 minutes ago (tag 0.0.3-bar)
+
+            this.fixture = new EmptyRepositoryFixture("feature/foo");
+
+            this.fixture.MakeACommit("A");
+            this.fixture.ApplyTag("0.0.3-bar");
+            this.fixture.MakeACommit("B");
+        }
+
+        [OneTimeTearDown]
+        public void OneTimeTearDown() => this.fixture?.Dispose();
+
+        [TestCase(IncrementStrategy.None, null, ExpectedResult = "0.0.3-bar+1")]
+        [TestCase(IncrementStrategy.Patch, null, ExpectedResult = "0.0.3-bar+1")]
+        [TestCase(IncrementStrategy.Minor, null, ExpectedResult = "0.0.3-bar+1")]
+        [TestCase(IncrementStrategy.Major, null, ExpectedResult = "0.0.3-bar+1")]
+
+        [TestCase(IncrementStrategy.None, "", ExpectedResult = "0.0.3-1+2")]
+        [TestCase(IncrementStrategy.Patch, "", ExpectedResult = "0.0.3-1+2")]
+        [TestCase(IncrementStrategy.Minor, "", ExpectedResult = "0.1.0-1+2")]
+        [TestCase(IncrementStrategy.Major, "", ExpectedResult = "1.0.0-1+2")]
+
+        [TestCase(IncrementStrategy.None, "foo", ExpectedResult = "0.0.3-foo.1+2")]
+        [TestCase(IncrementStrategy.Patch, "foo", ExpectedResult = "0.0.3-foo.1+2")]
+        [TestCase(IncrementStrategy.Minor, "foo", ExpectedResult = "0.1.0-foo.1+2")]
+        [TestCase(IncrementStrategy.Major, "foo", ExpectedResult = "1.0.0-foo.1+2")]
+
+        [TestCase(IncrementStrategy.None, "bar", ExpectedResult = "0.0.3-bar+1")]
+        [TestCase(IncrementStrategy.Patch, "bar", ExpectedResult = "0.0.3-bar+1")]
+        [TestCase(IncrementStrategy.Minor, "bar", ExpectedResult = "0.0.3-bar+1")]
+        [TestCase(IncrementStrategy.Major, "bar", ExpectedResult = "0.0.3-bar+1")]
+        public string GetVersion(IncrementStrategy increment, string? label)
+        {
+            var mainline = MainlineBuilder
+                .WithBranch("feature", b => b.WithIncrement(increment).WithLabel(label))
+                .Build();
+
+            return this.fixture!.GetVersion(mainline).FullSemVer;
+        }
+    }
+}

@@ -1,0 +1,258 @@
+name: Verify & Publish Docs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [ publish-release ]
+  push:
+    branches:
+      - main
+    paths:
+      - build/**
+      - src/**
+      - global.json
+      - .config/dotnet-tools.json
+      - .github/actions/cache-restore/**
+      - docs/**
+      - CONTRIBUTING.md
+      - BREAKING_CHANGES.md
+      - package*.json
+      - markdownlint.json
+      - .remarkrc.yaml
+      - mkdocs.yml
+      - .github/workflows/docs.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - build/**
+      - src/**
+      - global.json
+      - .config/dotnet-tools.json
+      - .github/actions/cache-restore/**
+      - docs/**
+      - CONTRIBUTING.md
+      - BREAKING_CHANGES.md
+      - package*.json
+      - markdownlint.json
+      - .remarkrc.yaml
+      - mkdocs.yml
+      - .github/workflows/docs.yml
+env:
+  DOTNET_ROLL_FORWARD: "Major"
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+  DOTNET_NOLOGO: 1
+
+jobs:
+  prepare:
+    name: Prepare Build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Cache cake frosting
+        id: cache-cake
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: run
+          key: run-${{ runner.os }}-${{ hashFiles('./build/**') }}
+
+      - name: Use cached tools
+        id: cache-tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: tools
+          key: tools-${{ runner.os }}-${{ hashFiles('./build/**', './.gitversion.yml') }}
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+          dotnet-version: '10.0.x'
+
+      - name: '[Build]'
+        if: steps.cache-cake.outputs.cache-hit != 'true'
+        run: dotnet build build/ --configuration=Release
+
+      - name: '[Prepare]'
+        shell: pwsh
+        run: dotnet run/build.dll --target=BuildPrepare
+
+      - name: Validate C# docs parser compatibility
+        run: dotnet run/docs.dll --target=ValidateDocsParser
+
+  validate:
+    name: Validates Html
+    needs: [ prepare ]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Restore State
+        uses: $/.github/actions/cache-restore # NOSONAR -- $/ resolves to the running commit.
+
+      - name: Get npm cache directory
+        shell: bash
+        id: cache-node-dir
+        run: |
+          cacheDir=$(npm config get cache)
+          echo "dir=$cacheDir" >> "$GITHUB_OUTPUT"
+
+      - name: Restore npm cache
+        id: cache-node
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.cache-node-dir.outputs.dir }}
+          key: node-${{ runner.os }}-${{ hashFiles('./package-lock.json') }}
+          restore-keys: node-${{ runner.os }}
+
+      - name: Verify documentation input selection
+        run: dotnet run --file docs/scripts/check-docs-inputs.cs
+
+      - name: Verify reference links in scoped Markdown documentation
+        run: |
+          npm ci --ignore-scripts
+          npm run test:links
+          npm run check:links
+
+      - name: Restore released documentation inputs
+        id: docs-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: artifacts/docs/cache
+          key: docs-inputs-v2-${{ runner.os }}-${{ hashFiles('docs/versions.json') }}
+          restore-keys: |
+            docs-inputs-v2-${{ runner.os }}-${{ hashFiles('docs/versions.json') }}-
+            docs-inputs-v2-${{ runner.os }}-
+
+      - name: Verify algorithm documentation mappings
+        run: |
+          npm run test:algorithm-docs
+          npm run check:algorithm-docs
+
+      - name: '[Build Documentation]'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: dotnet run/docs.dll --target=BuildDocs
+
+      # New releases can add immutable inputs without changing the manifest.
+      # Save only when the verified archive set differs from the restored cache.
+      - name: Save released documentation inputs
+        if: hashFiles('artifacts/docs/cache/**/*.sha512') != '' && steps.docs-cache.outputs.cache-matched-key != format('docs-inputs-v2-{0}-{1}-{2}', runner.os, hashFiles('docs/versions.json'), hashFiles('artifacts/docs/cache/**/*.sha512'))
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: artifacts/docs/cache
+          key: docs-inputs-v2-${{ runner.os }}-${{ hashFiles('docs/versions.json') }}-${{ hashFiles('artifacts/docs/cache/**/*.sha512') }}
+
+      - name: '[HTMLProofer]'
+        uses: chabad360/htmlproofer@c2750eb7eb937599ac859517e7dd23a29f1b3ed7 # v2
+        with:
+          directory: ./artifacts/docs/preview
+          arguments: --ignore-urls /api/,/docs/,/5.12.0/ --allow-hash-href --allow-missing-href --assume-extension .html --disable-external --no-check-external-hash
+
+      - name: '[Reviewdog Reporter]'
+        id: reporter
+        run: |
+          value=${{ github.event_name == 'pull_request' && 'github-pr-review' || 'github-check' }}
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
+      - name: '[Remark Lint]'
+        uses: reviewdog/action-remark-lint@b59ae6b0c8764e8fe1b72541328b9a19f0f94ae0 # v5.20.0
+        with:
+          github_token: ${{ github.token }}
+          reporter: ${{ steps.reporter.outputs.value }}
+
+  publish:
+    if: github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch'
+    name: Publish docs
+    needs: [ validate ]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GITHUB_USERNAME: ${{ github.actor }}
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Restore State
+        uses: $/.github/actions/cache-restore # NOSONAR -- $/ resolves to the running commit.
+
+      - name: Get npm cache directory
+        shell: bash
+        id: cache-node-dir
+        run: |
+          cacheDir=$(npm config get cache)
+          echo "dir=$cacheDir" >> "$GITHUB_OUTPUT"
+
+      - name: Restore npm cache
+        id: cache-node
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.cache-node-dir.outputs.dir }}
+          key: node-${{ runner.os }}-${{ hashFiles('./package-lock.json') }}
+          restore-keys: node-${{ runner.os }}
+
+      - name: Restore released documentation inputs
+        id: docs-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: artifacts/docs/cache
+          key: docs-inputs-v2-${{ runner.os }}-${{ hashFiles('docs/versions.json') }}
+          restore-keys: |
+            docs-inputs-v2-${{ runner.os }}-${{ hashFiles('docs/versions.json') }}-
+            docs-inputs-v2-${{ runner.os }}-
+
+      - name: '[Build Schemas]'
+        shell: pwsh
+        run: dotnet run/docs.dll --target=GenerateSchemas
+
+      - name: '[Publish Documentation]'
+        if: github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: dotnet run/docs.dll --target=PublishDocs --force
+
+      - name: Save released documentation inputs
+        if: hashFiles('artifacts/docs/cache/**/*.sha512') != '' && steps.docs-cache.outputs.cache-matched-key != format('docs-inputs-v2-{0}-{1}-{2}', runner.os, hashFiles('docs/versions.json'), hashFiles('artifacts/docs/cache/**/*.sha512'))
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: artifacts/docs/cache
+          key: docs-inputs-v2-${{ runner.os }}-${{ hashFiles('docs/versions.json') }}-${{ hashFiles('artifacts/docs/cache/**/*.sha512') }}

@@ -1,0 +1,60 @@
+name: PR History
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'support/*'
+      - 'next/*'
+  merge_group:
+    types: [ checks_requested ]
+
+permissions:
+  contents: read
+
+jobs:
+  linear-history:
+    name: Linear PR History
+    # Queue PRs contain synthetic merges; contributor PRs are checked before queue entry.
+    if: >-
+      ${{ github.event_name != 'pull_request' ||
+          !(github.event.pull_request.user.login == 'mergify[bot]' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/')) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout pull request head
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Verify pull request history is linear
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          merge_commits=$(git rev-list --merges "$merge_base..$HEAD_SHA")
+
+          if [[ -n "$merge_commits" ]]; then
+            echo "PR branches must be rebased and must not contain merge commits."
+            git log --oneline --merges "$merge_base..$HEAD_SHA"
+            exit 1
+          fi
+
+      - name: Confirm merge group history
+        if: github.event_name == 'merge_group'
+        run: echo "GitHub validates linear branch relationships before creating a merge group."

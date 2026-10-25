@@ -1,0 +1,37 @@
+name: Mark public API as shipped
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [ publish-release ]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  public-api:
+    name: Mark public API as shipped
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: gittools/cicd/checkout@824c3d773fb5d1b00c26b474ae88b7ce9ae555ee # v5
+        with:
+          op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          fetch-depth: 0
+
+      - name: Mark public API as shipped
+        run: ./src/mark-shipped.ps1
+
+      - name: Commit and push changes
+        uses: gittools/cicd/git-commit-push@824c3d773fb5d1b00c26b474ae88b7ce9ae555ee # v5
+        with:
+          message: "include public API changes"

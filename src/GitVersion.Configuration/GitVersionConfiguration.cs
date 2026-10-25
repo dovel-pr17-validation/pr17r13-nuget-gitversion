@@ -1,0 +1,212 @@
+using System.Globalization;
+using GitVersion.Configuration.Attributes;
+using GitVersion.VersionCalculation;
+using static GitVersion.Configuration.ConfigurationConstants;
+
+namespace GitVersion.Configuration;
+
+internal sealed record GitVersionConfiguration : BranchConfiguration, IGitVersionConfiguration
+{
+    private ICalculationConfiguration? calculation;
+    private IOutputConfiguration? output;
+    private IReadOnlyDictionary<string, IBranchConfiguration>? effectiveBranches;
+
+    [JsonIgnore]
+    public ICalculationConfiguration Calculation => this.calculation ??= new CalculationConfiguration(this);
+
+    [JsonIgnore]
+    public IOutputConfiguration Output => this.output ??= new OutputConfiguration(this);
+
+    [JsonPropertyName("workflow")]
+    [JsonPropertyDescription("The base template of the configuration to use. Possible values are: 'GitFlow/v1' or 'GitHubFlow/v1'")]
+    public string? Workflow { get; set; }
+
+    [JsonPropertyName("assembly-versioning-scheme")]
+    [JsonPropertyDescription($"The scheme to use when setting AssemblyVersion attribute. Can be 'MajorMinorPatchTag', 'MajorMinorPatch', 'MajorMinor', 'Major', 'None'. Defaults to '{NameOfDefaultAssemblyVersioningScheme}'.")]
+    [JsonPropertyDefault(DefaultAssemblyVersioningScheme)]
+    public AssemblyVersioningScheme? AssemblyVersioningScheme { get; set; }
+
+    [JsonPropertyName("assembly-file-versioning-scheme")]
+    [JsonPropertyDescription($"The scheme to use when setting AssemblyFileVersion attribute. Can be 'MajorMinorPatchTag', 'MajorMinorPatch', 'MajorMinor', 'Major', 'None'. Defaults to '{NameOfDefaultAssemblyFileVersioningScheme}'.")]
+    [JsonPropertyDefault(DefaultAssemblyFileVersioningScheme)]
+    public AssemblyFileVersioningScheme? AssemblyFileVersioningScheme { get; set; }
+
+    [JsonPropertyName("assembly-informational-format")]
+    [JsonPropertyDescription($"Specifies the format of AssemblyInformationalVersion. Defaults to '{DefaultAssemblyInformationalFormat}'.")]
+    [JsonPropertyDefault($"'{DefaultAssemblyInformationalFormat}'")]
+    public string? AssemblyInformationalFormat { get; set; }
+
+    [JsonPropertyName("assembly-versioning-format")]
+    [JsonPropertyDescription("Specifies the format of AssemblyVersion and overwrites the value of assembly-versioning-scheme.")]
+    public string? AssemblyVersioningFormat { get; set; }
+
+    [JsonPropertyName("assembly-file-versioning-format")]
+    [JsonPropertyDescription("Specifies the format of AssemblyFileVersion and overwrites the value of assembly-file-versioning-scheme.")]
+    public string? AssemblyFileVersioningFormat { get; set; }
+
+    [JsonPropertyName("tag-prefix")]
+    [JsonPropertyDescription($"A regular expression which is used to trim Git tags before processing. Defaults to '{RegexPatterns.Configuration.DefaultTagPrefixRegexPattern}'. Matching is case-insensitive by default; use (?-i) to enable case-sensitive matching.")]
+    [JsonPropertyDefault(RegexPatterns.Configuration.DefaultTagPrefixRegexPattern)]
+    [JsonPropertyFormat(Format.Regex)]
+    public string? TagPrefixPattern { get; set; }
+
+    [JsonPropertyName("version-in-branch-pattern")]
+    [JsonPropertyDescription($"A regular expression which is used to determine the version number in the branch name or commit message (e.g., v1.0.0-LTS). Defaults to '{RegexPatterns.Configuration.DefaultVersionInBranchRegexPattern}'. Matching is case-insensitive by default; use (?-i) to enable case-sensitive matching.")]
+    [JsonPropertyDefault(RegexPatterns.Configuration.DefaultVersionInBranchRegexPattern)]
+    [JsonPropertyFormat(Format.Regex)]
+    public string? VersionInBranchPattern { get; set; }
+
+    [JsonPropertyName("next-version")]
+    [JsonPropertyDescription("Allows you to bump the next version explicitly. Useful for bumping main or a feature branch with breaking changes")]
+    public string? NextVersion
+    {
+        get => this.nextVersion;
+        set =>
+            this.nextVersion = int.TryParse(value, NumberStyles.Any, NumberFormatInfo.InvariantInfo, out var major)
+                ? $"{major}.0"
+                : value;
+    }
+    private string? nextVersion;
+
+    [JsonPropertyName("major-version-bump-message")]
+    [JsonPropertyDescription($"The regular expression to match commit messages with to perform a major version increment. Defaults to '{RegexPatterns.VersionCalculation.DefaultMajorRegexPattern}'. Matching is case-insensitive by default; use (?-i) to enable case-sensitive matching.")]
+    [JsonPropertyDefault(RegexPatterns.VersionCalculation.DefaultMajorRegexPattern)]
+    [JsonPropertyFormat(Format.Regex)]
+    public string? MajorVersionBumpMessage { get; set; }
+
+    [JsonPropertyName("minor-version-bump-message")]
+    [JsonPropertyDescription($"The regular expression to match commit messages with to perform a minor version increment. Defaults to '{RegexPatterns.VersionCalculation.DefaultMinorRegexPattern}'. Matching is case-insensitive by default; use (?-i) to enable case-sensitive matching.")]
+    [JsonPropertyDefault(RegexPatterns.VersionCalculation.DefaultMinorRegexPattern)]
+    [JsonPropertyFormat(Format.Regex)]
+    public string? MinorVersionBumpMessage { get; set; }
+
+    [JsonPropertyName("patch-version-bump-message")]
+    [JsonPropertyDescription($"The regular expression to match commit messages with to perform a patch version increment. Defaults to '{RegexPatterns.VersionCalculation.DefaultPatchRegexPattern}'. Matching is case-insensitive by default; use (?-i) to enable case-sensitive matching.")]
+    [JsonPropertyDefault(RegexPatterns.VersionCalculation.DefaultPatchRegexPattern)]
+    [JsonPropertyFormat(Format.Regex)]
+    public string? PatchVersionBumpMessage { get; set; }
+
+    [JsonPropertyName("no-bump-message")]
+    [JsonPropertyDescription($"Used to tell GitVersion not to increment when in Mainline development mode. Defaults to '{RegexPatterns.VersionCalculation.DefaultNoBumpRegexPattern}'. Matching is case-insensitive by default; use (?-i) to enable case-sensitive matching.")]
+    [JsonPropertyDefault(RegexPatterns.VersionCalculation.DefaultNoBumpRegexPattern)]
+    [JsonPropertyFormat(Format.Regex)]
+    public string? NoBumpMessage { get; set; }
+
+    [JsonPropertyName("version-bump-reset-message")]
+    [JsonPropertyDescription($"The regular expression to match commit messages that reset the version bump baseline and suppress the configured branch increment. Defaults to '{RegexPatterns.VersionCalculation.DefaultVersionBumpResetRegexPattern}'. Matching is case-insensitive by default; use (?-i) to enable case-sensitive matching.")]
+    [JsonPropertyDefault(RegexPatterns.VersionCalculation.DefaultVersionBumpResetRegexPattern)]
+    [JsonPropertyFormat(Format.Regex)]
+    public string? VersionBumpResetMessage { get; set; }
+
+    [JsonPropertyName("tag-pre-release-weight")]
+    [JsonPropertyDescription($"The pre-release weight in case of tagged commits. Defaults to {StringDefaultTagPreReleaseWeight}.")]
+    public int? TagPreReleaseWeight { get; set; }
+
+    [JsonPropertyName("commit-date-format")]
+    [JsonPropertyDescription($"The format to use when calculating the commit date. Defaults to '{DefaultCommitDateFormat}'. See [Standard Date and Time Format Strings](https://learn.microsoft.com/en-us/dotnet/standard/base-types/standard-date-and-time-format-strings) and [Custom Date and Time Format Strings](https://learn.microsoft.com/en-us/dotnet/standard/base-types/standard-date-and-time-format-strings).")]
+    [JsonPropertyDefault(DefaultCommitDateFormat)]
+    [System.Diagnostics.CodeAnalysis.StringSyntax("DateTimeFormat")]
+    public string? CommitDateFormat { get; set; }
+
+    [JsonPropertyName("merge-message-formats")]
+    [JsonPropertyDescription("Custom regular expression merge message formats to enable identification of merge messages that do not follow the built-in conventions. Matching is case-insensitive by default; use (?-i) to enable case-sensitive matching.")]
+    public Dictionary<string, string> MergeMessageFormats { get; set; } = [];
+
+    [JsonIgnore]
+    IReadOnlyDictionary<string, string> IGitVersionConfiguration.MergeMessageFormats => MergeMessageFormats;
+
+    [JsonPropertyName("update-build-number")]
+    [JsonPropertyDescription($"Whether to update the build number in the project file. Defaults to {StringDefaultUpdateBuildNumber}.")]
+    [JsonPropertyDefault(DefaultUpdateBuildNumber)]
+    public bool UpdateBuildNumber { get; set; } = DefaultUpdateBuildNumber;
+
+    [JsonPropertyName("semantic-version-format")]
+    [JsonPropertyDescription($"Specifies the semantic version format that is used when parsing the string. Can be 'Strict' or 'Loose'. Defaults to '{StringDefaultSemanticVersionFormat}'.")]
+    [JsonPropertyDefault(DefaultSemanticVersionFormat)]
+    public SemanticVersionFormat SemanticVersionFormat { get; set; }
+
+    [JsonIgnore]
+    VersionStrategies IGitVersionConfiguration.VersionStrategy => VersionStrategies.Length == 0
+        ? VersionCalculation.VersionStrategies.None : VersionStrategies.Aggregate((one, another) => one | another);
+
+    [JsonPropertyName("strategies")]
+    [JsonPropertyDescription($"Specifies which version strategies (one or more) will be used to determine the next version. Following values are available: '{nameof(VersionCalculation.VersionStrategies.ConfiguredNextVersion)}', '{nameof(VersionCalculation.VersionStrategies.MergeMessage)}', '{nameof(VersionCalculation.VersionStrategies.TaggedCommit)}', '{nameof(VersionCalculation.VersionStrategies.TrackReleaseBranches)}', '{nameof(VersionCalculation.VersionStrategies.VersionInBranchName)}' and '{nameof(VersionCalculation.VersionStrategies.Mainline)}'.")]
+    public VersionStrategies[] VersionStrategies { get; set; } = [];
+
+    [JsonIgnore]
+    IReadOnlyDictionary<string, IBranchConfiguration> IGitVersionConfiguration.Branches
+        => this.effectiveBranches ??= Branches.ToDictionary(element => element.Key, IBranchConfiguration (element) => element.Value);
+
+    [JsonPropertyName("branches")]
+    [JsonPropertyDescription("The header for all the individual branch configuration.")]
+    public Dictionary<string, BranchConfiguration> Branches { get; set; } = [];
+
+    [JsonIgnore]
+    IIgnoreConfiguration IGitVersionConfiguration.Ignore => Ignore;
+
+    [JsonPropertyName("ignore")]
+    [JsonPropertyDescription("The header property for the ignore configuration.")]
+    public IgnoreConfiguration Ignore { get; set; } = new();
+
+    public override IBranchConfiguration Inherit(IBranchConfiguration configuration) => throw new NotSupportedException();
+
+    public override IBranchConfiguration Inherit(EffectiveConfiguration configuration) => throw new NotSupportedException();
+
+    public IBranchConfiguration GetEmptyBranchConfiguration() => new BranchConfiguration
+    {
+        RegularExpression = string.Empty,
+        Label = BranchNamePlaceholder,
+        Increment = IncrementStrategy.Inherit
+    };
+
+    private sealed class CalculationConfiguration(GitVersionConfiguration configuration) : ICalculationConfiguration
+    {
+        private IReadOnlyDictionary<string, ICalculationBranchConfiguration>? branches;
+
+        public string? TagPrefixPattern => configuration.TagPrefixPattern;
+        public string? VersionInBranchPattern => configuration.VersionInBranchPattern;
+        public string? NextVersion => configuration.NextVersion;
+        public string? MajorVersionBumpMessage => configuration.MajorVersionBumpMessage;
+        public string? MinorVersionBumpMessage => configuration.MinorVersionBumpMessage;
+        public string? PatchVersionBumpMessage => configuration.PatchVersionBumpMessage;
+        public string? NoBumpMessage => configuration.NoBumpMessage;
+        public string? VersionBumpResetMessage => configuration.VersionBumpResetMessage;
+        public IReadOnlyDictionary<string, string> MergeMessageFormats => configuration.MergeMessageFormats;
+        public SemanticVersionFormat SemanticVersionFormat => configuration.SemanticVersionFormat;
+        public VersionStrategies VersionStrategy => ((IGitVersionConfiguration)configuration).VersionStrategy;
+        public IReadOnlyDictionary<string, ICalculationBranchConfiguration> Branches
+            => this.branches ??= configuration.Branches.ToDictionary(element => element.Key, ICalculationBranchConfiguration (element) => element.Value);
+        public IIgnoreConfiguration Ignore => configuration.Ignore;
+        public DeploymentMode? DeploymentMode => configuration.DeploymentMode;
+        public string? Label => configuration.Label;
+        public IncrementStrategy Increment => configuration.Increment;
+        public IPreventIncrementConfiguration PreventIncrement => configuration.PreventIncrement;
+        public bool? TrackMergeTarget => configuration.TrackMergeTarget;
+        public bool? TrackMergeMessage => configuration.TrackMergeMessage;
+        public CommitMessageIncrementMode? CommitMessageIncrementing => configuration.CommitMessageIncrementing;
+        public string? RegularExpression => configuration.RegularExpression;
+        public IReadOnlyCollection<string> SourceBranches => configuration.SourceBranches;
+        public IReadOnlyCollection<string> IsSourceBranchFor => configuration.IsSourceBranchFor;
+        public bool? TracksReleaseBranches => configuration.TracksReleaseBranches;
+        public bool? IsReleaseBranch => configuration.IsReleaseBranch;
+        public bool? IsMainBranch => configuration.IsMainBranch;
+    }
+
+    private sealed class OutputConfiguration(GitVersionConfiguration configuration) : IOutputConfiguration
+    {
+        private IReadOnlyDictionary<string, IOutputBranchConfiguration>? branches;
+
+        public AssemblyVersioningScheme? AssemblyVersioningScheme => configuration.AssemblyVersioningScheme;
+        public AssemblyFileVersioningScheme? AssemblyFileVersioningScheme => configuration.AssemblyFileVersioningScheme;
+        public string? AssemblyInformationalFormat => configuration.AssemblyInformationalFormat;
+        public string? AssemblyVersioningFormat => configuration.AssemblyVersioningFormat;
+        public string? AssemblyFileVersioningFormat => configuration.AssemblyFileVersioningFormat;
+        public int? TagPreReleaseWeight => configuration.TagPreReleaseWeight;
+        public string? CommitDateFormat => configuration.CommitDateFormat;
+        public bool UpdateBuildNumber => configuration.UpdateBuildNumber;
+        public IReadOnlyDictionary<string, IOutputBranchConfiguration> Branches
+            => this.branches ??= configuration.Branches.ToDictionary(element => element.Key, IOutputBranchConfiguration (element) => element.Value);
+        public string? CustomVersionFormat => configuration.CustomVersionFormat;
+        public int? PreReleaseWeight => configuration.PreReleaseWeight;
+    }
+}

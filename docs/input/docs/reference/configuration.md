@@ -1,0 +1,1452 @@
+---
+Order: 10
+Title: Configuration
+Description: Details about how GitVersion can be configured to suit your needs
+RedirectFrom: docs/configuration
+---
+
+This is the complete settings reference, including built-in workflow defaults.
+For a shorter starting point, use [configuration by topic][configuration-by-topic]
+or follow [Configure GitVersion][configure-gitversion].
+
+Defaults depend on the selected workflow and effective branch configuration.
+Use the configuration output below to inspect them rather than assuming that
+every workflow uses the same deployment mode.
+
+Validate a candidate first with `gitversion config validate --config GitVersion.yml`.
+Explicit-file validation works outside Git and resolves the same workflow defaults
+and overrides as normal execution. It checks public keys/types, configured regexes
+and branch-definition references without calculating versions or changing files.
+See [configuration validation][configuration-validation] for the JSON contract and
+limits. Matching-version schema and loader checks remain useful for older tools.
+
+To see the effective configuration (defaults and overrides), you can run
+`gitversion --show-config`.
+
+For a single v7 scalar setting, use `gitversion config get calculation.tag-prefix`.
+The result is a JSON scalar after workflow, file and runtime overrides have been
+applied. Both querying and full display honor runtime overrides with v7
+configuration. Querying requires v7 configuration; branch maps and structured
+values are unsupported. See [query a configuration property][query-a-configuration-property]
+for path syntax, null handling, exit statuses and examples.
+
+## Configuration tool
+
+The interactive configuration tool (`gitversion init`) was removed in
+GitVersion v6.0.0. The [removal commit][removal-commit]
+removed the init wizard and its command handling. Create `GitVersion.yml`
+manually, [choose a workflow][choose-a-workflow], and inspect the
+resolved settings with `gitversion --show-config`. Follow
+[Configure GitVersion][configure-gitversion] for current configuration guidance,
+or the [trunk-based guide][trunk-based-guide] to try
+`TrunkBased/preview1`.
+
+## v7 configuration layout
+
+GitVersion v7 separates version **calculation** from version **output**. Put
+calculation settings under `calculation` and settings that format or publish
+the calculated version under `output`:
+
+```yaml
+workflow: GitHubFlow/v1
+calculation:
+  branches:
+    main:
+      increment: Patch
+output:
+  update-build-number: true
+  branches:
+    main:
+      pre-release-weight: 55000
+```
+
+`calculation.branches` contains branch-discovery and version-calculation
+settings. `output.branches` contains branch-specific output settings. A branch
+may appear in either section or both; GitVersion combines both sections into
+one effective branch configuration.
+
+`workflow` belongs at the document root because it selects a preset for the
+whole configuration. Presets can supply defaults for both `calculation` and
+`output`, including output settings for branches defined by the preset. User
+configuration overrides those defaults, and runtime overrides take precedence
+over the user configuration. A file containing only `workflow: GitHubFlow/v1`
+is valid in either configuration format.
+
+| v6 flat setting | v7 location |
+| --- | --- |
+| `assembly-file-versioning-format`, `assembly-file-versioning-scheme`, `assembly-informational-format`, `assembly-versioning-format`, `assembly-versioning-scheme`, `commit-date-format`, `custom-version-format`, `pre-release-weight`, `tag-pre-release-weight`, `update-build-number` | `output.<setting>` |
+| `workflow` | `workflow` (unchanged, applies to both sections) |
+| Every other root setting, including `branches`, `ignore`, `next-version`, `strategies`, and `tag-prefix` | `calculation.<setting>` |
+| Branch `custom-version-format`, `pre-release-weight` | `output.branches.<branch>.<setting>` |
+| Every other branch setting, including `increment`, `label`, `mode`, `regex`, and `source-branches` | `calculation.branches.<branch>.<setting>` |
+
+In v7, `gitversion --show-config` emits this nested structure. The temporary
+v6 flat format can be selected only with
+`GITVERSION_CONFIGURATION_VERSION=v6` in v7.0; GitVersion warns when it loads
+a user configuration that way.
+
+### Migrating an existing configuration
+
+When upgrading from v5, first [migrate any `master` overrides][migrate-any-master-overrides]
+to the v6 configuration keys. The layout migration command below does not
+rename branch configuration keys or references to them.
+
+Use the migration command with the default POSIX-style argument parser to
+convert a v6 document without opening a repository. It works on all supported
+operating systems; the legacy v6 argument parser does not support it:
+
+```shell
+# Discover GitVersion.yml in the target/current directory and write YAML to stdout
+gitversion config migrate
+
+# Select an input explicitly, write a new file, or replace that input
+gitversion config migrate --config GitVersion.yml --output GitVersion.v7.yml
+gitversion config migrate --config GitVersion.yml --in-place
+```
+
+`--output` refuses to overwrite an existing file unless `--force` is supplied;
+`--output` and `--in-place` cannot be combined. `--in-place` warns because
+comments cannot be preserved. The command is deterministic: migrating an
+already nested v7 document produces the same YAML again.
+
+Migration also relocates `calculation.workflow` from the earlier v7 draft layout
+to the root. Runtime loading accepts only root-level `workflow`; duplicate
+root/nested selectors and `output.workflow` are rejected.
+
+### Migrating master overrides from v5
+
+If your v5 configuration uses `branches.master` to override the built-in main
+branch settings, change that key to `branches.main` for v6. Later v5 releases
+already used `main` internally but accepted `master` for compatibility. v6
+removed that compatibility mapping; see the
+[v6.0.0 breaking changes][v6-0-0-breaking-changes].
+
+For example, this v5 configuration overrides the main branch increment and
+restricts the feature configuration's source branches:
+
+```yaml
+branches:
+  master:
+    increment: Minor
+  feature:
+    source-branches: [master]
+```
+
+The equivalent v6 configuration uses the flat layout:
+
+```yaml
+branches:
+  main:
+    increment: Minor
+  feature:
+    source-branches: [main]
+```
+
+For v7, use the nested layout (or convert the corrected v6 file with
+`gitversion config migrate`):
+
+```yaml
+calculation:
+  branches:
+    main:
+      increment: Minor
+    feature:
+      source-branches: [main]
+```
+
+`main` here is a **configuration key**, not a requirement to rename your Git
+branch. The built-in `main` configuration's default `regex` matches both Git
+branches `main` and `master`. The overrides above therefore also apply when
+your repository's branch is still named `master`.
+
+In v6 and v7, a `master` configuration entry is a separate custom entry, so a
+partial override can fail with
+`Branch configuration 'master' is missing required configuration 'regex'`.
+Update references to the renamed key in `source-branches` and, where
+applicable, `is-source-branch-for`, preserving the other entries in each list.
+These properties refer to configuration keys. Do not blindly rename
+intentionally custom configurations or literal Git branch names and regular
+expressions. Custom configurations still need their own required settings,
+including `regex` and `source-branches`.
+
+### Overriding v7 configuration
+
+`--override-config` uses the selected configuration structure. With the v7
+default, use root-level `--override-config workflow=GitHubFlow/v1` for the preset,
+and nested keys such as
+`--override-config calculation.tag-prefix='[vV]?'` and
+`--override-config output.update-build-number=false`. Branch overrides follow
+the same ownership map, for example
+`calculation.branches.main.increment=Patch` and
+`output.branches.main.pre-release-weight=55000`. Flat v6 keys are rejected in
+v7 mode with their nested replacement.
+
+## Global configuration
+
+The following supported workflow configurations are available in GitVersion and can be referenced by the workflow property:
+
+* GitFlow (GitFlow/v1)
+* GitHubFlow (GitHubFlow/v1)
+* [TrunkBased][trunk-based-guide] (`TrunkBased/preview1`, experimental preview; [worked examples][worked-examples])
+
+Example of using a `GitHubFlow` workflow with a different `tag-prefix`:
+
+```yaml
+workflow: GitHubFlow/v1
+calculation:
+  tag-prefix: '[abc]'
+```
+
+The built-in configuration for the `GitFlow` workflow (`workflow: GitFlow/v1`) looks like:
+
+<!-- snippet: /docs/workflows/GitFlow/v1.yml -->
+<a id='snippet-/docs/workflows/GitFlow/v1.yml'></a>
+```yml
+calculation:
+  branches:
+    develop:
+      increment: Minor
+      is-main-branch: false
+      is-release-branch: false
+      is-source-branch-for: []
+      label: alpha
+      mode: ContinuousDelivery
+      prevent-increment:
+        when-current-commit-tagged: false
+      regex: ^dev(elop)?(ment)?$
+      source-branches:
+        - main
+      track-merge-message: true
+      track-merge-target: true
+      tracks-release-branches: true
+    main:
+      increment: Patch
+      is-main-branch: true
+      is-release-branch: false
+      is-source-branch-for: []
+      label: ''
+      prevent-increment:
+        of-merged-branch: true
+      regex: "^master$|^main$"
+      source-branches: []
+      track-merge-message: true
+      track-merge-target: false
+      tracks-release-branches: false
+    release:
+      increment: Minor
+      is-main-branch: false
+      is-release-branch: true
+      is-source-branch-for: []
+      label: beta
+      mode: ManualDeployment
+      prevent-increment:
+        of-merged-branch: true
+        when-current-commit-tagged: false
+      regex: "^releases?[\\/-](?<BranchName>.+)"
+      source-branches:
+        - main
+        - support
+      track-merge-target: false
+      tracks-release-branches: false
+    feature:
+      increment: Inherit
+      is-main-branch: false
+      is-source-branch-for: []
+      label: "{BranchName}"
+      mode: ManualDeployment
+      prevent-increment:
+        when-current-commit-tagged: false
+      regex: "^features?[\\/-](?<BranchName>.+)"
+      source-branches:
+        - develop
+        - main
+        - release
+        - support
+        - hotfix
+      track-merge-message: true
+    pull-request:
+      increment: Inherit
+      is-source-branch-for: []
+      label: "PullRequest{Number}"
+      mode: ContinuousDelivery
+      prevent-increment:
+        of-merged-branch: true
+        when-current-commit-tagged: false
+      regex: "^(pull-requests|pull|pr)[\\/-](?<Number>\\d*)"
+      source-branches:
+        - develop
+        - main
+        - release
+        - feature
+        - support
+        - hotfix
+      track-merge-message: true
+    hotfix:
+      increment: Inherit
+      is-main-branch: false
+      is-release-branch: true
+      is-source-branch-for: []
+      label: beta
+      mode: ManualDeployment
+      prevent-increment:
+        when-current-commit-tagged: false
+      regex: "^hotfix(es)?[\\/-](?<BranchName>.+)"
+      source-branches:
+        - main
+        - support
+    support:
+      increment: Patch
+      is-main-branch: true
+      is-release-branch: false
+      is-source-branch-for: []
+      label: ''
+      prevent-increment:
+        of-merged-branch: true
+      regex: "^support[\\/-](?<BranchName>.+)"
+      source-branches:
+        - main
+      track-merge-target: false
+      tracks-release-branches: false
+    unknown:
+      increment: Inherit
+      is-main-branch: false
+      is-source-branch-for: []
+      label: "{BranchName}"
+      mode: ManualDeployment
+      prevent-increment:
+        when-current-commit-tagged: true
+      regex: "(?<BranchName>.+)"
+      source-branches:
+        - main
+        - develop
+        - release
+        - feature
+        - pull-request
+        - hotfix
+        - support
+  commit-message-incrementing: Enabled
+  ignore:
+    branches: []
+    paths: []
+    sha: []
+    tags: []
+  increment: Inherit
+  is-main-branch: false
+  is-release-branch: false
+  is-source-branch-for: []
+  label: "{BranchName}"
+  major-version-bump-message: "[+=]semver:\\s?(breaking|major)"
+  merge-message-formats: {}
+  minor-version-bump-message: "[+=]semver:\\s?(feature|minor)"
+  mode: ContinuousDelivery
+  no-bump-message: "[+=]semver:\\s?(none|skip)"
+  patch-version-bump-message: "[+=]semver:\\s?(fix|patch)"
+  prevent-increment:
+    of-merged-branch: false
+    when-branch-merged: false
+    when-current-commit-tagged: true
+  regex: ''
+  semantic-version-format: Strict
+  source-branches: []
+  strategies:
+    - Fallback
+    - ConfiguredNextVersion
+    - MergeMessage
+    - TaggedCommit
+    - TrackReleaseBranches
+    - VersionInBranchName
+  tag-prefix: "[vV]?"
+  track-merge-message: true
+  track-merge-target: false
+  tracks-release-branches: false
+  version-bump-reset-message: "=semver:"
+  version-in-branch-pattern: "(?<version>[vV]?\\d+(\\.\\d+)?(\\.\\d+)?).*"
+output:
+  assembly-file-versioning-scheme: MajorMinorPatch
+  assembly-versioning-scheme: MajorMinorPatch
+  branches:
+    develop:
+      pre-release-weight: 0
+    main:
+      pre-release-weight: 55000
+    release:
+      pre-release-weight: 30000
+    feature:
+      pre-release-weight: 30000
+    pull-request:
+      pre-release-weight: 30000
+    hotfix:
+      pre-release-weight: 30000
+    support:
+      pre-release-weight: 55000
+  commit-date-format: yyyy-MM-dd
+  tag-pre-release-weight: 60000
+  update-build-number: true
+```
+<sup><a href='/docs/workflows/GitFlow/v1.yml#L1-L180' title='Snippet source file'>snippet source</a> | <a href='#snippet-/docs/workflows/GitFlow/v1.yml' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+The supported built-in configuration for the `GitHubFlow` workflow (`workflow: GitHubFlow/v1`) looks like:
+
+<!-- snippet: /docs/workflows/GitHubFlow/v1.yml -->
+<a id='snippet-/docs/workflows/GitHubFlow/v1.yml'></a>
+```yml
+calculation:
+  branches:
+    main:
+      increment: Patch
+      is-main-branch: true
+      is-release-branch: false
+      is-source-branch-for: []
+      label: ''
+      prevent-increment:
+        of-merged-branch: true
+      regex: "^master$|^main$"
+      source-branches: []
+      track-merge-message: true
+      track-merge-target: false
+      tracks-release-branches: false
+    release:
+      increment: Patch
+      is-main-branch: false
+      is-release-branch: true
+      is-source-branch-for: []
+      label: beta
+      mode: ManualDeployment
+      prevent-increment:
+        of-merged-branch: true
+        when-branch-merged: false
+        when-current-commit-tagged: false
+      regex: "^releases?[\\/-](?<BranchName>.+)"
+      source-branches:
+        - main
+      track-merge-message: true
+      track-merge-target: false
+      tracks-release-branches: false
+    feature:
+      increment: Inherit
+      is-main-branch: false
+      is-source-branch-for: []
+      label: "{BranchName}"
+      mode: ManualDeployment
+      prevent-increment:
+        when-current-commit-tagged: false
+      regex: "^features?[\\/-](?<BranchName>.+)"
+      source-branches:
+        - main
+        - release
+      track-merge-message: true
+    pull-request:
+      increment: Inherit
+      is-source-branch-for: []
+      label: "PullRequest{Number}"
+      mode: ContinuousDelivery
+      prevent-increment:
+        of-merged-branch: true
+        when-current-commit-tagged: false
+      regex: "^(pull-requests|pull|pr)[\\/-](?<Number>\\d*)"
+      source-branches:
+        - main
+        - release
+        - feature
+      track-merge-message: true
+    unknown:
+      increment: Inherit
+      is-main-branch: false
+      is-source-branch-for: []
+      label: "{BranchName}"
+      mode: ManualDeployment
+      prevent-increment:
+        when-current-commit-tagged: false
+      regex: "(?<BranchName>.+)"
+      source-branches:
+        - main
+        - release
+        - feature
+        - pull-request
+      track-merge-message: false
+  commit-message-incrementing: Enabled
+  ignore:
+    branches: []
+    paths: []
+    sha: []
+    tags: []
+  increment: Inherit
+  is-main-branch: false
+  is-release-branch: false
+  is-source-branch-for: []
+  label: "{BranchName}"
+  major-version-bump-message: "[+=]semver:\\s?(breaking|major)"
+  merge-message-formats: {}
+  minor-version-bump-message: "[+=]semver:\\s?(feature|minor)"
+  mode: ContinuousDelivery
+  no-bump-message: "[+=]semver:\\s?(none|skip)"
+  patch-version-bump-message: "[+=]semver:\\s?(fix|patch)"
+  prevent-increment:
+    of-merged-branch: false
+    when-branch-merged: false
+    when-current-commit-tagged: true
+  regex: ''
+  semantic-version-format: Strict
+  source-branches: []
+  strategies:
+    - Fallback
+    - ConfiguredNextVersion
+    - MergeMessage
+    - TaggedCommit
+    - TrackReleaseBranches
+    - VersionInBranchName
+  tag-prefix: "[vV]?"
+  track-merge-message: true
+  track-merge-target: false
+  tracks-release-branches: false
+  version-bump-reset-message: "=semver:"
+  version-in-branch-pattern: "(?<version>[vV]?\\d+(\\.\\d+)?(\\.\\d+)?).*"
+output:
+  assembly-file-versioning-scheme: MajorMinorPatch
+  assembly-versioning-scheme: MajorMinorPatch
+  branches:
+    main:
+      pre-release-weight: 55000
+    release:
+      pre-release-weight: 30000
+    feature:
+      pre-release-weight: 30000
+    pull-request:
+      pre-release-weight: 30000
+  commit-date-format: yyyy-MM-dd
+  tag-pre-release-weight: 60000
+  update-build-number: true
+```
+<sup><a href='/docs/workflows/GitHubFlow/v1.yml#L1-L126' title='Snippet source file'>snippet source</a> | <a href='#snippet-/docs/workflows/GitHubFlow/v1.yml' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+The preview built-in configuration (experimental usage only) for the `TrunkBased` workflow (`workflow: TrunkBased/preview1`) looks like:
+
+<!-- snippet: /docs/workflows/TrunkBased/preview1.yml -->
+<a id='snippet-/docs/workflows/TrunkBased/preview1.yml'></a>
+```yml
+calculation:
+  branches:
+    main:
+      increment: Patch
+      is-main-branch: true
+      is-release-branch: false
+      is-source-branch-for: []
+      label: ''
+      mode: ContinuousDeployment
+      prevent-increment:
+        of-merged-branch: true
+      regex: "^master$|^main$"
+      source-branches: []
+      track-merge-message: true
+      track-merge-target: false
+      tracks-release-branches: false
+    feature:
+      increment: Minor
+      is-main-branch: false
+      is-source-branch-for: []
+      label: "{BranchName}"
+      mode: ContinuousDelivery
+      prevent-increment:
+        when-current-commit-tagged: false
+      regex: "^features?[\\/-](?<BranchName>.+)"
+      source-branches:
+        - main
+      track-merge-message: true
+    hotfix:
+      increment: Patch
+      is-main-branch: false
+      is-release-branch: true
+      is-source-branch-for: []
+      label: "{BranchName}"
+      mode: ContinuousDelivery
+      prevent-increment:
+        when-current-commit-tagged: false
+      regex: "^hotfix(es)?[\\/-](?<BranchName>.+)"
+      source-branches:
+        - main
+    pull-request:
+      increment: Inherit
+      is-source-branch-for: []
+      label: "PullRequest{Number}"
+      mode: ContinuousDelivery
+      prevent-increment:
+        of-merged-branch: true
+        when-current-commit-tagged: false
+      regex: "^(pull-requests|pull|pr)[\\/-](?<Number>\\d*)"
+      source-branches:
+        - main
+        - feature
+        - hotfix
+      track-merge-message: true
+    unknown:
+      increment: Patch
+      is-source-branch-for: []
+      prevent-increment:
+        when-current-commit-tagged: false
+      regex: "(?<BranchName>.+)"
+      source-branches:
+        - main
+  commit-message-incrementing: Enabled
+  ignore:
+    branches: []
+    paths: []
+    sha: []
+    tags: []
+  increment: Inherit
+  is-main-branch: false
+  is-release-branch: false
+  is-source-branch-for: []
+  label: "{BranchName}"
+  major-version-bump-message: "[+=]semver:\\s?(breaking|major)"
+  merge-message-formats: {}
+  minor-version-bump-message: "[+=]semver:\\s?(feature|minor)"
+  mode: ContinuousDelivery
+  no-bump-message: "[+=]semver:\\s?(none|skip)"
+  patch-version-bump-message: "[+=]semver:\\s?(fix|patch)"
+  prevent-increment:
+    of-merged-branch: false
+    when-branch-merged: false
+    when-current-commit-tagged: true
+  regex: ''
+  semantic-version-format: Strict
+  source-branches: []
+  strategies:
+    - ConfiguredNextVersion
+    - Mainline
+  tag-prefix: "[vV]?"
+  track-merge-message: true
+  track-merge-target: false
+  tracks-release-branches: false
+  version-bump-reset-message: "=semver:"
+  version-in-branch-pattern: "(?<version>[vV]?\\d+(\\.\\d+)?(\\.\\d+)?).*"
+output:
+  assembly-file-versioning-scheme: MajorMinorPatch
+  assembly-versioning-scheme: MajorMinorPatch
+  branches:
+    main:
+      pre-release-weight: 55000
+    feature:
+      pre-release-weight: 30000
+    hotfix:
+      pre-release-weight: 30000
+    pull-request:
+      pre-release-weight: 30000
+    unknown:
+      pre-release-weight: 30000
+  commit-date-format: yyyy-MM-dd
+  tag-pre-release-weight: 60000
+  update-build-number: true
+```
+<sup><a href='/docs/workflows/TrunkBased/preview1.yml#L1-L112' title='Snippet source file'>snippet source</a> | <a href='#snippet-/docs/workflows/TrunkBased/preview1.yml' title='Start of snippet'>anchor</a></sup>
+<!-- endSnippet -->
+
+The details of the available options are as follows:
+
+:::{.alert .alert-info}
+**Regular expression matching**
+
+Unless stated otherwise, regular expressions in GitVersion configuration are
+matched case-insensitively. To require case-sensitive matching, prefix the
+expression with `(?-i)`, for example `(?-i)^experimental-`.
+:::
+
+### assembly-file-versioning-format
+
+This is an `output` setting: `output.assembly-file-versioning-format`.
+
+Specifies the format of `AssemblyFileVersion` and
+overwrites the value of `assembly-file-versioning-scheme`.
+
+Expressions in curly braces reference one of the [variables][variables]
+or a process-scoped environment variable (when prefixed with `env:`).  For example,
+
+```yaml
+# use a variable if non-null or a fallback value otherwise
+output:
+  assembly-file-versioning-format: '{Major}.{Minor}.{Patch}.{WeightedPreReleaseNumber ?? 0}'
+
+# use an environment variable or raise an error if not available
+output:
+  assembly-file-versioning-format: '{Major}.{Minor}.{Patch}.{env:BUILD_NUMBER}'
+
+# use an environment variable if available or a fallback value otherwise
+output:
+  assembly-file-versioning-format: '{Major}.{Minor}.{Patch}.{env:BUILD_NUMBER ?? 42}'
+```
+
+### assembly-file-versioning-scheme
+
+This is an `output` setting: `output.assembly-file-versioning-scheme`.
+
+When updating assembly info, `assembly-file-versioning-scheme` tells GitVersion
+how to treat the `AssemblyFileVersion` attribute. Note: you can use `None` to
+skip updating the `AssemblyFileVersion` while still updating the
+`AssemblyVersion` and `AssemblyInformationVersion` attributes. Valid values:
+`MajorMinorPatchTag`, `MajorMinorPatch`, `MajorMinor`, `Major`, `None`.
+
+### assembly-informational-format
+
+This is an `output` setting: `output.assembly-informational-format`.
+
+Specifies the format of `AssemblyInformationalVersion`.
+Follows the same formatting semantics as `assembly-file-versioning-format`.
+The default value is `{InformationalVersion}`.
+
+### assembly-versioning-format
+
+This is an `output` setting: `output.assembly-versioning-format`.
+
+Specifies the format of `AssemblyVersion` and
+overwrites the value of `assembly-versioning-scheme`.
+Follows the same formatting semantics as `assembly-file-versioning-format`.
+
+### assembly-versioning-scheme
+
+This is an `output` setting: `output.assembly-versioning-scheme`.
+
+When updating assembly info, `assembly-versioning-scheme` tells GitVersion how
+to treat the `AssemblyVersion` attribute. Useful to lock the major when using
+Strong Naming. Note: you can use `None` to skip updating the `AssemblyVersion`
+while still updating the `AssemblyFileVersion` and `AssemblyInformationVersion`
+attributes. Valid values: `MajorMinorPatchTag`, `MajorMinorPatch`, `MajorMinor`,
+`Major`, `None`.
+
+For information on using format strings in these properties, see
+[Format Strings][format-strings].
+
+### branches
+
+The header for all the individual branch configurations. Entries are named
+configuration keys; their `regex` selects the Git branches they apply to.
+The built-in `main` key matches both `main` and `master` by default. For v5
+files that use `branches.master`, see [migration guidance][migrate-any-master-overrides].
+
+### increment
+
+Same as for the [global configuration, explained above][global-configuration-explained-above].
+
+### is-main-branch
+
+This indicates that this branch is a main branch. By default `main` and `support/*` are main branches.
+
+### is-release-branch
+
+Indicates this branch config represents a release branch in GitFlow.
+
+### label
+
+The pre-release label to use for this branch. Use the value `{BranchName}` as a placeholder to
+insert the value of the named group `BranchName` from the [regular expression][regular-expression].
+
+For example: branch `feature/foo` would become a pre-release label
+of `alpha.foo` with `label: 'alpha.{BranchName}'` and `regex: '^features?[\/-](?<BranchName>.+)'`.
+
+Another example: branch `features/sc-12345/some-description` would become a pre-release label of `sc-12345` with `label: '{StoryNo}'` and `regex: '^features?[\/-](?<StoryNo>sc-\d+)[-/].+'`.
+
+Use `{Sha}` for the full hash of the commit being versioned, or `{ShortSha}` for
+its abbreviated hash, using the same seven-character abbreviation as the
+`ShortSha` output variable. These placeholders work without named regex captures
+and can be combined with them, for example `label: '{BranchName}.ci.{ShortSha}'`.
+
+```yaml
+workflow: GitHubFlow/v1
+calculation:
+  branches:
+    feature:
+      label: 'ci.{ShortSha}'
+```
+
+For a commit whose abbreviated hash is `a1b2c3d`, this configures the label
+`ci.a1b2c3d`. The pre-release number still follows the selected deployment mode.
+In the temporary [v6 compatibility mode][v6-compatibility-mode], put the same
+`label` setting under `branches.feature` instead of `calculation.branches.feature`.
+
+Placeholder names are case-sensitive. If the branch regex contains a named
+capture `Sha` or `ShortSha`, that capture takes precedence over the corresponding
+commit value, including when the capture is empty. Commit values always refer
+to the commit being versioned, even while GitVersion examines earlier commits
+or merged branches to calculate its version.
+
+You can also use environment variable placeholders with the `{env:VARIABLE_NAME}` syntax. Environment variable placeholders can also be combined with regex placeholders, for example `{BranchName}-{env:VARIABLE_NAME}`, and support fallback values using the `{env:VARIABLE_NAME ?? "fallback"}` syntax. These can be combined with cascading fallbacks using environment variables and placeholders like this: `{env:VARIABLE_NAME ?? BranchName ?? "fallback"}`.
+
+**Note:** To clear a default use an empty string: `label: ''`
+
+### label-number-pattern
+
+Pull requests require us to extract the pre-release number out of the branch
+name so `refs/pull/534/merge` builds as `PullRequest534`. This is a regex with
+a named capture group called `Number`.
+
+**Example usage:**
+
+```yaml
+calculation:
+  branches:
+    pull-request:
+      mode: ContinuousDelivery
+      label: PullRequest{Number}
+      increment: Inherit
+      prevent-increment:
+        of-merged-branch: true
+        when-current-commit-tagged: false
+      track-merge-message: true
+      regex: ^(pull-requests|pull|pr)[\/-](?<Number>\d*)
+      source-branches:
+      - main
+      - release
+      - feature
+      is-source-branch-for: []
+output:
+  branches:
+    pull-request:
+      pre-release-weight: 30000
+```
+
+### mode
+
+Same as for the [global configuration, explained above][global-configuration-explained-above-2].
+
+### pre-release-weight
+
+This is an output setting: `output.pre-release-weight` globally or
+`output.branches.<branch>.pre-release-weight` for a branch.
+
+Provides a way to translate the `PreReleaseLabelName` ([variables][variables]) to a numeric
+value in order to avoid version collisions across different branches. For
+example, a release branch created after "1.2.3-alpha.55" results in
+"1.2.3-beta.1" and thus e.g. "1.2.3-alpha.4" and "1.2.3-beta.4" would have the
+same file version: "1.2.3.4". One of the ways to use this value is to set
+`assembly-file-versioning-format:
+{Major}.{Minor}.{Patch}.{WeightedPreReleaseNumber}`. If the `pre-release-weight`
+is set, it would be added to the `PreReleaseNumber` to get a final
+`AssemblySemFileVer`, otherwise a branch specific default for
+`pre-release-weight` will be used in the calculation. Related Issues [1145][1145]
+and [1366][1366].
+
+### prevent-increment-of-merged-branch
+
+The increment of the branch merged to will be ignored, regardless of whether the merged branch has a version number or not, when this branch related property is set to true on the target branch.
+
+When `release-2.0.0` is merged into main, we want main to build `2.0.0`. If
+`release-2.0.0` is merged into develop we want it to build `2.1.0`, this option
+prevents incrementing after a versioned branch is merged.
+
+In a GitFlow-based repository, setting this option can have implications on the
+`VersionSourceDistance` output variable. It can rule out a potentially
+better version source proposed by the `MergeMessageBaseVersionStrategy`. For
+more details and an in-depth analysis, please see [the discussion][2506].
+
+### prevent-increment-when-branch-merged
+
+The increment of the merged branch will be ignored when this branch related property is set to `true` on the source branch.
+
+### prevent-increment-when-current-commit-tagged
+
+This branch related property controls the behvior whether to use the tagged (value set to true) or the incremented (value set to false) semantic version. Defaults to true.
+
+### track-merge-message
+
+This property is a branch related property and gives the user the possibility to control the behavior of whether the merge
+commit message will be interpreted as a next version or not. Consider we have a main branch and a `release/1.0.0` branch and
+merge changes from `release/1.0.0` to the `main` branch. If `track-merge-message` is set to `true` then the next version will
+be `1.0.0` otherwise `0.0.1`.
+
+### track-merge-target
+
+Strategy which will look for tagged merge commits directly off the current
+branch. For example `develop` → `release/1.0.0` → merge into `main` and tag
+`1.0.0`. The tag is *not* on develop, but develop should be version `1.0.0` now.
+
+### tracks-release-branches
+
+Controls whether this branch tracks release branches when calculating its version.
+This is typically enabled for `develop` in GitFlow.
+
+With the `TrackReleaseBranches` strategy enabled, a release branch's version is
+taken from its name. If the name contains no version, GitVersion uses the highest
+semantic prerelease tag matching that release branch's [configured label][configured-label]. Matching
+is case-insensitive. Tags must be on the release branch's first-parent history,
+outside the first-parent history of configured `main` branches. A release tag
+remains eligible when its commit is merged into `main` through a merge commit.
+Like versioned release names, tags are evaluated against the current release
+refs, including when versioning an older commit. Tags on newer sibling release
+commits are eligible; advancing the tracking branch alone does not change tag eligibility.
+This does not reconstruct historical branch or tag state. [Tag prefix][tag-prefix],
+[semantic version format][semantic-version-format], and [ignore][ignore] settings apply.
+The release branch must share an ancestor with the commit being versioned.
+
+For example, with release label `rc`, `releases/R2301` tagged `1.0.0-RC.1` lets
+`develop` advance to `1.1.0-beta.1` after its next commit when `develop`'s label is
+`beta`. Versioned release names retain precedence over tags within this strategy.
+Git does not record which branch created a tag; first-parent history and the
+release label determine eligibility, including when the tracking branch
+(typically `develop`) was branched from the tagged release commit.
+
+### commit-date-format
+
+This is an `output` setting: `output.commit-date-format`.
+
+Sets the format which will be used to format the `CommitDate` output variable.
+
+### commit-message-incrementing
+
+Sets whether it should be possible to increment the version with special syntax
+in the commit message. See the `*-version-bump-message` options above for
+details on the syntax. Default set to `Enabled`; set to `Disabled` to disable.
+
+### custom-version-format
+
+This is an `output` setting: `output.custom-version-format` globally or
+`output.branches.<branch>.custom-version-format` for a branch.
+
+Specifies the format of the `CustomVersion` output variable.
+Follows the same formatting semantics as `assembly-file-versioning-format` and
+can use version variables or environment variables. `CustomVersion` is empty
+when no format is configured. The format can be configured globally and
+overridden for individual branches under `branches`.
+
+### ignore
+
+The header property for the `ignore` configuration.
+
+:::{.alert .alert-info}
+**Note:** When ignoring a commit or a range of commits, they are only ignored in
+the search for a [version source][version-sources], not when calculating other
+parts of the version number, such as build metadata.
+:::
+
+#### branches
+
+A sequence of regular expressions matching branch names that should not be
+used as [version sources][version-sources]. Patterns are matched
+case-insensitively against the friendly branch name. For remote-tracking
+branches, the remote name is removed first, so the same pattern matches both
+`release/legacy` and `upstream/release/legacy`. Multiple patterns use OR
+semantics, and `^` and `$` can be used to anchor a match. To require
+case-sensitive matching, prefix a pattern with `(?-i)`.
+
+```yaml
+calculation:
+  ignore:
+    branches:
+      - ^experimental/
+      - ^release/legacy$
+```
+
+The current branch and an explicitly requested target branch remain available
+for version calculation even when they match an ignore pattern. During dynamic
+repository normalization, ignored remote-tracking branches are not created or
+updated as local branches, except when the ignored branch is the requested
+target. Ignoring a branch does not exclude commits that are also reachable from
+other references.
+
+Ignored branches remain available as parent branches when GitVersion resolves
+an inherited branch configuration. This preserves the branching configuration
+model without making the ignored reference eligible for auxiliary main-branch
+or release-branch version-source discovery.
+
+Branch exclusions are applied after remote references are fetched. They do not
+prevent GitVersion from fetching an ignored branch from its remote.
+
+#### commits-before
+
+Date and time in the format `yyyy-MM-ddTHH:mm:ss` (eg `commits-before:
+2015-10-23T12:23:15`) to setup an exclusion range. Effectively any commit before
+`commits-before` will be ignored.
+
+#### paths
+
+A sequence of regular expressions that represent paths in the repository. Commits that modify these paths will be excluded from version calculations. For example, to filter out commits that belong to `docs`:
+
+```yaml
+calculation:
+  ignore:
+    paths:
+      - ^docs\/
+```
+
+##### *Monorepo*
+
+This ignore config can be used to filter only those commits that belong to a specific project in a monorepo.
+As an example, consider a monorepo consisting of subdirectories for `ProjectA`, `ProjectB` and a shared `LibraryC`. For GitVersion to consider only commits that are part of `ProjectA` and shared library `LibraryC`, a regex that matches all paths except those starting with `ProjectA` or `LibraryC` can be used. Either one of the following configs would filter out `ProjectB`.
+
+* Specific match on `ProjectB/*`:
+
+```yaml
+calculation:
+  ignore:
+    paths:
+      - '^ProjectB/.*'
+```
+
+* Negative lookahead on anything other than `ProjectA/*` and `LibraryC/*`:
+
+```yaml
+calculation:
+  ignore:
+    paths:
+      - '^(?!ProjectA/|LibraryC/).*'
+```
+
+A commit having changes only in `ProjectB/*` path would be ignored. A commit having changes in the following paths wouldn't be ignored:
+
+* `ProjectA/*`
+* `LibraryC/*`
+* `ProjectA/*` and `LibraryC/*`
+* `ProjectA/*` and `ProjectB/*`
+* `LibraryC/*` and `ProjectB/*`
+* `ProjectA/*` and `ProjectB/*` and `LibraryC/*`
+
+:::
+Note: The `ignore.paths` configuration is case-insensitive. To require
+case-sensitive path matching, prefix the regular expression with `(?-i)`. For
+example, `(?-i)^docs\/` matches `docs/` but not `Docs/`.
+:::
+
+::: {.alert .alert-warning}
+A commit is ignored by the `ignore.paths` configuration only if **all paths** changed in that commit match one or more of the specified regular expressions. If a path in a commit does not match any one of the ignore patterns, that commit will be included in version calculations.
+:::
+
+#### sha
+
+A sequence of SHAs to be excluded from the version calculations. Useful when
+there is a rogue commit in history yielding a bad version. You can use either
+style below:
+
+```yaml
+calculation:
+  ignore:
+    sha: [e7bc24c0f34728a25c9187b8d0b041d935763e3a, 764e16321318f2fdb9cdeaa56d1156a1cba307d7]
+```
+
+or
+
+```yaml
+calculation:
+  ignore:
+    sha:
+      - e7bc24c0f34728a25c9187b8d0b041d935763e3a
+      - 764e16321318f2fdb9cdeaa56d1156a1cba307d7
+```
+
+#### tags
+
+A sequence of regular expressions matching tag names that should not be used as
+[version sources][version-sources]. Patterns are matched case-insensitively
+against the friendly tag name without the `refs/tags/` prefix. Multiple patterns
+use OR semantics, and `^` and `$` can be used to anchor a match. To require
+case-sensitive matching, prefix a pattern with `(?-i)`.
+
+```yaml
+calculation:
+  ignore:
+    tags:
+      - ^experimental-
+      - ^v0\.
+```
+
+Ignoring a tag does not ignore the commit it points to. The commit remains part
+of version calculation and can still be reached through other references.
+
+### increment
+
+The part of the SemVer to increment when GitVersion detects it needs to be
+increased, such as for commits after a tag: `Major`, `Minor`, `Patch`, `None`.
+
+The special value `Inherit` means that GitVersion should find the parent branch
+(i.e. the branch where the current branch was branched from), and use its values
+for [increment][global-configuration-explained-above] or other branch related properties.
+
+For a synthetic pull request merge ref, GitVersion uses the `TargetBranch`
+captured from the merge commit message as the immediate parent when it matches
+an allowed source branch. If the message has no matching target, GitVersion
+falls back to Git ancestry, as it does for ordinary branches.
+
+### is-source-branch-for
+
+The reverse of `source-branches`. This property was introduced to keep it easy
+to extend GitVersion's config.
+
+It exists to make it easier to extend GitVersion's configuration. If only
+`source-branches` exists and you add a new branch type, for instance
+`unstable/`, you then need to re-define the `source-branches` configuration
+value for existing branches (like feature/) to now include the new unstable
+branch.
+
+A complete example:
+
+```yaml
+calculation:
+  branches:
+    unstable:
+      regex: ...
+      is-source-branch-for: ['main', 'develop', 'feature', 'hotfix', 'support']
+```
+
+Without this configuration value you would have to do:
+
+```yaml
+calculation:
+  branches:
+    unstable:
+      regex:
+    feature:
+      source-branches: ['unstable', 'develop', 'feature', 'hotfix', 'support']
+    release:
+      source-branches: ['unstable', 'develop']
+    etc...
+```
+
+### major-version-bump-message
+
+The regex to match commit messages with to perform a major version increment.
+Default set to `'[+=]semver:\s?(breaking|major)'`, which will match occurrences
+of `+semver: major`, `=semver: major`, and the corresponding `breaking` forms.
+
+### merge-message-formats
+
+Custom merge message formats to enable identification of merge messages that do not
+follow the built-in conventions.  Entries should be added as key-value pairs where
+the value is a regular expression.
+e.g.
+
+```yaml
+merge-message-formats:
+    tfs: '^Merged (?:PR (?<PullRequestNumber>\d+)): Merge (?<SourceBranch>.+) to (?<TargetBranch>.+)'
+```
+
+The regular expression should contain the following capture groups:
+
+* `SourceBranch` - Identifies the source branch of the merge
+* `TargetBranch` - Identifies the target branch of the merge
+* `PullRequestNumber` - Captures the pull-request number
+
+Custom merge message formats are evaluated *before* any built in formats.
+Support for [Conventional Commits][conventional-commits] can be
+[configured][conventional-commits-config].
+
+### minor-version-bump-message
+
+The regex to match commit messages with to perform a minor version increment.
+Default set to `'[+=]semver:\s?(feature|minor)'`, which will match occurrences
+of `+semver: minor`, `=semver: minor`, and the corresponding `feature` forms.
+
+### mode
+
+Sets the `mode` of how GitVersion should create a new version. Read more at
+[deployment modes][modes].
+
+### next-version
+
+Allows you to bump the next version explicitly. Useful for bumping `main` or a
+feature branch with breaking changes (i.e., a major increment), indicating what
+the next `git tag` is going to be.
+
+`next-version` is not a permanent replacement for `git tag` and should only be
+used intermittently. Since version 5.5 GitVersion supports `next-version` with
+`mode: Mainline` and should not be treated as a "base version".
+
+If you are using `next-version` and are experiencing weird versioning behaviour,
+please remove it, create a `git tag` with an appropriate version number on an
+appropriate historical commit and see if that resolves any versioning issues
+you may have.
+
+### no-bump-message
+
+Used to tell GitVersion not to increment when in Mainline development mode.
+Default `[+=]semver:\s?(none|skip)`, which will match both the `+semver` and
+`=semver` forms of `none` and `skip`.
+
+When a commit matches **both** the `no-bump-message` **and** any combination of
+the `version-bump-message`, `no-bump-message` takes precedence and no increment is applied.
+
+### patch-version-bump-message
+
+The regex to match commit messages with to perform a patch version increment.
+Default set to `'[+=]semver:\s?(fix|patch)'`, which will match occurrences of
+`+semver: patch`, `=semver: patch`, and the corresponding `fix` forms.
+
+### regex
+
+This is the regex which is used to match the current branch to the correct
+branch configuration.
+
+[Named groups][named-groups] can be used to dynamically label pre-releases based on the branch name, or parts of it. See [Label][configured-label] for more details and examples.
+
+### semantic-version-format
+
+Specifies the semantic version format that is used when parsing the string.
+Can be `Strict` - using the [regex][regex]
+or `Loose` the old way of parsing. The default if not specified is `Strict`
+Example of invalid `Strict`, but valid `Loose`
+
+```log
+1.2-alpha4
+01.02.03-rc03
+1.2.3.4
+```
+
+### source-branches
+
+Because Git commits only refer to parent commits (not branches) GitVersion
+sometimes cannot tell which branch the current branch was branched from.
+
+Take this commit graph
+
+```shell
+* release/v1.0.0   * feature/foo
+| ________________/
+|/
+*
+*
+* (main)
+```
+
+By looking at this graph, you cannot tell which of these scenarios happened:
+
+* feature/foo branches off release/v1.0.0
+  * Branch release/v1.0.0 from main
+  * Branch feature/foo from release/v1.0.0
+  * Add a commit to both release/v1.0.0 and feature/foo
+  * release/v1.0.0 is the base for feature/foo
+* release/v1.0.0 branches off feature/foo
+  * Branch feature/foo from main
+  * Branch release/v1.0.0 from feature/foo
+  * Add a commit to both release/v1.0.0 and feature/foo
+  * feature/foo is the base for release/v1.0.0
+
+Or put more simply, you cannot tell which branch was created first,
+`release/v1.0.0` or `feature/foo`.
+
+To resolve this issue, we give GitVersion a hint about our branching workflows
+by telling it what types of branches a branch can be created from. For example,
+feature branches are, by default, configured to have the following source
+branches:
+
+`source-branches: ['main', 'develop', 'feature', 'hotfix', 'support']`
+
+This means that we will never bother to evaluate pull request branches as merge
+base options and being explicit in this way also improves the performance of
+GitVersion.
+
+### strategies
+
+Specifies which version strategy implementation (one or more) will be used to determine the next version.
+These strategies can be combined, and the order in which they are specified does not matter.
+The configuration accepts the following values:
+
+* Fallback
+* ConfiguredNextVersion
+* MergeMessage
+* TaggedCommit
+* TrackReleaseBranches
+* VersionInBranchName
+* Mainline
+
+### tag-pre-release-weight
+
+The pre-release weight in case of tagged commits. If the value is not set in the
+configuration, a default weight of 60000 is used instead. If the
+`WeightedPreReleaseNumber` [variable][variables] is 0 and this parameter is set,
+its value is used. This helps if your branching model is GitFlow and the last
+release build, which is often tagged, can utilize this parameter to produce a
+monotonically increasing build number.
+
+### tag-prefix
+
+A regular expression which is used to trim Git tags before processing (e.g.,
+v1.0.0). The default value is `[vV]?`. Confirm the selected tool's effective value
+with `gitversion config get calculation.tag-prefix`.
+
+### update-build-number
+
+Configures GitVersion to update the build number or not when running on a build server.
+
+## Branch configuration
+
+The following **v4 migration example** illustrates the change from regular-expression
+keys to named branch configurations. It uses the legacy flat layout and is retained
+only for that historical migration context; it is not a valid v7 configuration. For
+new v7 configuration, place branch calculation settings under `calculation.branches`
+and branch output settings under `output.branches`, as shown in the [v7 configuration
+layout][v6-compatibility-mode].
+
+:::{.alert .alert-info}
+**Note**
+
+v4 changed from using regexes for keys, to named configs
+:::
+
+If you have branch-specific configuration, upgrading to v4 required this change.
+
+```yaml
+workflow: 'GitHubFlow/v1'
+branches:
+  main:
+    label: ''
+    increment: Patch
+    prevent-increment:
+      of-merged-branch: true
+    track-merge-target: false
+    track-merge-message: true
+    regex: ^master$|^main$
+    source-branches: []
+    is-source-branch-for: []
+    tracks-release-branches: false
+    is-release-branch: false
+    is-main-branch: true
+    pre-release-weight: 55000
+  release:
+    mode: ManualDeployment
+    label: beta
+    increment: Patch
+    prevent-increment:
+      of-merged-branch: true
+      when-branch-merged: false
+      when-current-commit-tagged: false
+    track-merge-target: false
+    track-merge-message: true
+    regex: ^releases?[\/-](?<BranchName>.+)
+    source-branches:
+    - main
+    is-source-branch-for: []
+    tracks-release-branches: false
+    is-release-branch: true
+    is-main-branch: false
+    pre-release-weight: 30000
+  feature:
+    mode: ManualDeployment
+    label: '{BranchName}'
+    increment: Inherit
+    prevent-increment:
+      when-current-commit-tagged: false
+    track-merge-message: true
+    regex: ^features?[\/-](?<BranchName>.+)
+    source-branches:
+    - main
+    - release
+    is-source-branch-for: []
+    is-main-branch: false
+    pre-release-weight: 30000
+  pull-request:
+    mode: ContinuousDelivery
+    label: PullRequest{Number}
+    increment: Inherit
+    prevent-increment:
+      of-merged-branch: true
+      when-current-commit-tagged: false
+    track-merge-message: true
+    regex: ^(pull-requests|pull|pr)[\/-](?<Number>\d*)
+    source-branches:
+    - main
+    - release
+    - feature
+    is-source-branch-for: []
+    pre-release-weight: 30000
+  unknown:
+    mode: ManualDeployment
+    label: '{BranchName}'
+    increment: Inherit
+    prevent-increment:
+      when-current-commit-tagged: false
+    track-merge-message: false
+    regex: (?<BranchName>.+)
+    source-branches:
+    - main
+    - release
+    - feature
+    - pull-request
+    is-source-branch-for: []
+    is-main-branch: false
+```
+
+If you don't specify the regex, the built-in for that branch config will be
+used (recommended).
+
+We don't envision many people needing to change most of these configuration
+values, but here they are if you need to:
+
+### version-bump-reset-message
+
+The regex to match a commit message that resets the version bump baseline and
+suppresses the configured branch increment. The default is `=semver:`. The
+increment itself is still selected by the major, minor, patch, and no-bump
+message patterns above, whose defaults accept both `+semver` and `=semver`.
+
+For example, when a branch is configured with `increment: Patch`, a commit
+containing `=semver: none` keeps the current version and a commit containing
+`=semver: minor` selects a minor increment. Unlike the `+semver` form, the `=`
+form resets earlier commit-message increments in the calculation range and can
+lower the configured increment. This setting follows
+`commit-message-incrementing`.
+
+### version-in-branch-pattern
+
+A regular expression which is used to determine the version number in the branch
+name or commit message (e.g., v1.0.0-LTS). This setting only applies on branches
+where the option `is-release-branch` is set to `true`. The default value is
+`(?<version>[vV]?\d+(\.\d+)?(\.\d+)?).*`.
+
+### workflow
+
+The base template of the configuration to use. Possible values are `GitFlow/v1` or `GitHubFlow/v1`. Defaults to `GitFlow/v1` if not set. To create a configuration from scratch without using a base template, please specify an empty string.
+
+[configuration-by-topic]: /docs/reference/configuration-topics
+
+[configure-gitversion]: /docs/usage/configure
+
+[removal-commit]: https://github.com/GitTools/GitVersion/commit/09014f1af2367d79d53919c759a82ea998d9db6c
+
+[choose-a-workflow]: /docs/usage/choose-workflow
+
+[trunk-based-guide]: /docs/learn/branching-strategies/trunkbased
+
+[migrate-any-master-overrides]: #migrating-master-overrides-from-v5
+
+[v6-0-0-breaking-changes]: https://github.com/GitTools/GitVersion/blob/main/BREAKING_CHANGES.md#v600
+
+[worked-examples]: /docs/learn/branching-strategies/trunkbased/examples
+
+[format-strings]: /docs/reference/custom-formatting
+
+[global-configuration-explained-above]: #increment
+
+[regular-expression]: #regex
+
+[v6-compatibility-mode]: #v7-configuration-layout
+
+[global-configuration-explained-above-2]: #mode
+
+[configured-label]: #label
+
+[tag-prefix]: #tag-prefix
+
+[semantic-version-format]: #semantic-version-format
+
+[ignore]: #ignore
+
+[named-groups]: https://learn.microsoft.com/en-us/dotnet/standard/base-types/grouping-constructs-in-regular-expressions#named-matched-subexpressions
+
+[regex]: https://regex101.com/r/Ly7O1x/3/
+
+[1145]: https://github.com/GitTools/GitVersion/issues/1145
+
+[1366]: https://github.com/GitTools/GitVersion/issues/1366
+
+[2506]: https://github.com/GitTools/GitVersion/pull/2506#issuecomment-754754037
+
+[conventional-commits-config]: /docs/reference/version-increments#conventional-commit-messages
+
+[conventional-commits]: https://www.conventionalcommits.org/
+
+[modes]: /docs/reference/modes
+
+[variables]: /docs/reference/variables
+
+[version-sources]: /docs/reference/version-sources
+
+[query-a-configuration-property]: /docs/usage/cli/arguments#query-a-configuration-property
+
+[configuration-validation]: /docs/usage/cli/arguments#validate-configuration

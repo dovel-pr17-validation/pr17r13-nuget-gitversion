@@ -1,0 +1,58 @@
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_INSTALL_DIR: "./.dotnet"
+  DOTNET_ROLL_FORWARD: "Major"
+  GITVERSION_GIT_BACKEND: managed
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-2025-vs2026, ubuntu-24.04, macos-26 ]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Restore State
+        uses: $/.github/actions/cache-restore # NOSONAR -- $/ resolves to the running commit.
+
+      - name: '[Build]'
+        shell: pwsh
+        run: dotnet run/build.dll --target=Package
+
+      - name: 'Upload nuget packages'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.os == 'windows-2025-vs2026'
+        with:
+          name: nuget
+          path: ${{ github.workspace }}/artifacts/packages/nuget
+
+      - name: 'Upload native packages'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.os == 'windows-2025-vs2026'
+        with:
+          name: native-${{ runner.os }}
+          path: ${{ github.workspace }}/artifacts/packages/native/*.zip
+
+      - name: 'Upload native packages'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.os != 'windows-2025-vs2026'
+        with:
+          name: native-${{ runner.os }}
+          path: ${{ github.workspace }}/artifacts/packages/native/*.tar.gz

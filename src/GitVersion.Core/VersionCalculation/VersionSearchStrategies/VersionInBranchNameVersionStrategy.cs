@@ -1,0 +1,71 @@
+using System.Diagnostics.CodeAnalysis;
+using GitVersion.Configuration;
+using GitVersion.Extensions;
+
+namespace GitVersion.VersionCalculation;
+
+/// <summary>
+/// Version is extracted from the name of the branch.
+/// The semantic source is the branch name and has no intrinsic source commit.
+/// Does not increment.
+/// </summary>
+internal sealed class VersionInBranchNameVersionStrategy(Lazy<GitVersionContext> contextLazy, IEnvironment environment) : IVersionStrategy
+{
+    private readonly Lazy<GitVersionContext> contextLazy = contextLazy.NotNull();
+    private readonly IEnvironment environment = environment.NotNull();
+
+    private GitVersionContext Context => this.contextLazy.Value;
+
+    public IEnumerable<BaseVersion> GetBaseVersions(EffectiveBranchConfiguration configuration)
+    {
+        if (!Context.Configuration.VersionStrategy.HasFlag(VersionStrategies.VersionInBranchName))
+        {
+            yield break;
+        }
+
+        if (TryGetBaseVersion(configuration, out var baseVersion))
+        {
+            yield return baseVersion;
+        }
+    }
+
+    public bool TryGetBaseVersion(EffectiveBranchConfiguration configuration, [NotNullWhen(true)] out BaseVersion? baseVersion)
+    {
+        baseVersion = null;
+
+        if (!configuration.Value.IsReleaseBranch)
+        {
+            return false;
+        }
+
+        foreach (var branchName in new[] { Context.CurrentBranch, configuration.Branch }.Select(branch => branch.Name))
+        {
+            if (!branchName.TryGetSemanticVersion(configuration.Value, out var result))
+            {
+                continue;
+            }
+
+            string? branchNameOverride = null;
+            if (!result.Name.IsNullOrEmpty() && (Context.CurrentBranch.Name.Equals(branchName)
+                                                 || Context.Configuration.GetBranchConfiguration(Context.CurrentBranch.Name).Label is null))
+            {
+                branchNameOverride = result.Name;
+            }
+
+            var label = configuration.Value.GetBranchSpecificLabel(Context.CurrentBranch.Name, branchNameOverride, this.environment, Context.CurrentCommit);
+
+            baseVersion = new BaseVersion("Version in branch name", result.Value)
+            {
+                Operator = new BaseVersionOperator
+                {
+                    Increment = VersionField.None,
+                    ForceIncrement = false,
+                    Label = label
+                }
+            };
+            return true;
+        }
+
+        return false;
+    }
+}

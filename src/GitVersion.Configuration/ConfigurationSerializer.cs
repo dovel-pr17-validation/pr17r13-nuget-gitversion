@@ -1,0 +1,190 @@
+using SharpYaml;
+
+namespace GitVersion.Configuration;
+
+internal class ConfigurationSerializer : IConfigurationSerializer
+{
+    private static readonly HashSet<string> PreserveKeyOrderFor =
+    [
+        "branches",
+        "merge-message-formats"
+    ];
+
+    private static readonly ConfigurationYamlContext GeneratedContext = ConfigurationYamlContext.Default;
+
+    private static readonly YamlSerializerOptions SerializerOptions = new()
+    {
+        PropertyNamingPolicy = HyphenatedJsonNamingPolicy.Instance,
+        DefaultIgnoreCondition = YamlIgnoreCondition.WhenWritingNull,
+        Converters = [VersionStrategiesConverter.Instance]
+    };
+
+    public T Deserialize<T>(string input) // NOSONAR: IConfigurationSerializer requires an instance method.
+    {
+        if (typeof(T) == typeof(Dictionary<object, object?>))
+        {
+            var graph = YamlSerializer.Deserialize<Dictionary<string, object?>>(input, SerializerOptions);
+            return (T)(object)ConvertToObjectDictionary(graph);
+        }
+
+        if (typeof(T) == typeof(GitVersionConfiguration))
+        {
+            return (T)(object)DeserializeConfiguration(input, ConfigurationVersionSelector.Resolve(), "configuration document")!;
+        }
+
+        return YamlSerializer.Deserialize<T>(input, SerializerOptions)!;
+    }
+
+    public string Serialize(object graph) // NOSONAR: IConfigurationSerializer requires an instance method.
+    {
+        var yaml = SerializeLegacy(graph);
+        var configuration = YamlSerializer.Deserialize<Dictionary<string, object?>>(yaml, SerializerOptions) ?? [];
+        if (graph is IGitVersionConfiguration && ConfigurationVersionSelector.Resolve() == ConfigurationVersion.V7)
+        {
+            configuration = ConfigurationDocumentMapper.Nest(configuration);
+        }
+
+        return YamlSerializer.Serialize(OrderProperties(configuration), SerializerOptions);
+    }
+
+    internal static string SerializeDocument(IReadOnlyDictionary<object, object?> document)
+    {
+        var yaml = SerializeLegacy(document);
+        var configuration = YamlSerializer.Deserialize<Dictionary<string, object?>>(yaml, SerializerOptions) ?? [];
+        return YamlSerializer.Serialize(OrderProperties(configuration), SerializerOptions);
+    }
+
+    public string SerializeProperty(IGitVersionConfiguration configuration, string path)
+    {
+        var value = ConfigurationPropertyQuery.GetValue(configuration, path);
+        // Use the same scalar conversion as full YAML display, including public enum names.
+        var scalar = value is null ? null : Deserialize<object>(SerializeLegacy(value));
+        return JsonSerializer.Serialize(scalar);
+    }
+
+    public static IGitVersionConfiguration? ReadConfiguration(string input)
+        => DeserializeConfiguration(input, ConfigurationVersionSelector.Resolve(), "configuration document");
+
+    internal static string SerializeLegacy(object graph) => YamlSerializer.Serialize(graph, SerializerOptions);
+
+    internal static GitVersionConfiguration? DeserializeLegacyConfiguration(string input)
+        => DeserializeConfiguration(input, ConfigurationVersion.V6, "internal effective configuration");
+
+    private static GitVersionConfiguration? DeserializeConfiguration(
+        string input,
+        ConfigurationVersion version,
+        string source)
+    {
+        try
+        {
+            var graph = YamlSerializer.Deserialize<Dictionary<string, object?>>(input, SerializerOptions);
+            var objectGraph = ConvertToObjectDictionary(graph);
+            var normalized = ConfigurationDocumentMapper.Normalize(objectGraph, version, source);
+            var normalizedYaml = YamlSerializer.Serialize(normalized, SerializerOptions);
+            return YamlSerializer.Deserialize<GitVersionConfiguration>(normalizedYaml, GeneratedContext);
+        }
+        catch (Exception exception) when (exception is not YamlException and not ConfigurationException)
+        {
+            throw new YamlException(exception.Message, exception);
+        }
+    }
+
+    private static Dictionary<object, object?> ConvertToObjectDictionary(IReadOnlyDictionary<string, object?>? source)
+    {
+        if (source is null)
+        {
+            return [];
+        }
+
+        Dictionary<object, object?> result = [];
+        foreach (var item in source)
+        {
+            result[item.Key] = ConvertValue(item.Value);
+        }
+
+        return result;
+    }
+
+    private static object? ConvertValue(object? value) => value switch
+    {
+        IReadOnlyDictionary<string, object?> dictionary => ConvertToObjectDictionary(dictionary),
+        IDictionary<string, object?> dictionary => ConvertToObjectDictionary(new Dictionary<string, object?>(dictionary)),
+        IList list => ConvertList(list),
+        _ => value
+    };
+
+    private static List<object?> ConvertList(IList list)
+    {
+        List<object?> result = [];
+        foreach (var item in list)
+        {
+            result.Add(ConvertValue(item));
+        }
+
+        return result;
+    }
+
+    private static Dictionary<string, object?> OrderProperties(
+        IReadOnlyDictionary<string, object?> source,
+        bool orderKeys = true)
+    {
+        IEnumerable<KeyValuePair<string, object?>> entries = orderKeys
+            ? source.OrderBy(element => element.Key, StringComparer.Ordinal)
+            : source;
+        Dictionary<string, object?> result = [];
+
+        foreach (var (key, value) in entries)
+        {
+            result[key] = OrderValue(value, orderKeys: !PreserveKeyOrderFor.Contains(key));
+        }
+
+        return result;
+    }
+
+    private static object? OrderValue(object? value, bool orderKeys) => value switch
+    {
+        IReadOnlyDictionary<string, object?> dictionary => OrderProperties(dictionary, orderKeys),
+        IDictionary<string, object?> dictionary => OrderProperties(new Dictionary<string, object?>(dictionary), orderKeys),
+        IList list => list.Cast<object?>().Select(item => OrderValue(item, orderKeys: true)).ToList(),
+        _ => value
+    };
+
+    private sealed class HyphenatedJsonNamingPolicy : JsonNamingPolicy
+    {
+        public static JsonNamingPolicy Instance { get; } = new HyphenatedJsonNamingPolicy();
+
+        public override string ConvertName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+            {
+                return name;
+            }
+
+            var builder = new StringBuilder(name.Length + 8);
+            for (var index = 0; index < name.Length; index++)
+            {
+                var current = name[index];
+                if (char.IsUpper(current))
+                {
+                    var hasPrevious = index > 0;
+                    var hasNext = index + 1 < name.Length;
+                    var previousIsLowerOrDigit = hasPrevious && (char.IsLower(name[index - 1]) || char.IsDigit(name[index - 1]));
+                    var nextIsLower = hasNext && char.IsLower(name[index + 1]);
+
+                    if (hasPrevious && (previousIsLowerOrDigit || nextIsLower))
+                    {
+                        builder.Append('-');
+                    }
+
+                    builder.Append(char.ToLowerInvariant(current));
+                }
+                else
+                {
+                    builder.Append(current);
+                }
+            }
+
+            return builder.ToString();
+        }
+    }
+}

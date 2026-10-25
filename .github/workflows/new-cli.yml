@@ -1,0 +1,109 @@
+name: Build (new-cli)
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+      - 'fix/*'
+      - 'feature/*'
+      - 'poc/*'
+      - 'support/*'
+      - 'next/*'
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!.github/**'
+      - .github/workflows/new-cli.yml
+
+  pull_request:
+    branches:
+      - main
+      - 'support/*'
+      - 'next/*'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  DOTNET_ROLL_FORWARD: "Major"
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+  DOTNET_NOLOGO: 1
+  TESTINGPLATFORM_TELEMETRY_OPTOUT: 1
+
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    name: Build & Test (new-cli)
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Check for relevant changes
+        if: github.event_name == 'pull_request'
+        id: changes
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            relevant:
+              - '!{docs,.github}/**'
+              - '.github/workflows/new-cli.yml'
+
+      - name: Checkout
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup .NET SDK
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('global.json', '**/*.csproj', '**/*.props', '**/*.targets', 'NuGet.config', 'nuget.config') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Verify effective language versions
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        shell: pwsh
+        run: |
+          $projects = @(
+            @{ Path = 'src/GitVersion.App/GitVersion.App.csproj'; Framework = 'net10.0' },
+            @{ Path = 'src/GitVersion.App/GitVersion.App.csproj'; Framework = 'net11.0' },
+            @{ Path = 'new-cli/GitVersion.Cli/GitVersion.Cli.csproj'; Framework = 'net10.0' },
+            @{ Path = 'new-cli/GitVersion.Cli.Generator/GitVersion.Cli.Generator.csproj'; Framework = 'netstandard2.0' },
+            @{ Path = 'build/build/build.csproj'; Framework = 'net10.0' },
+            @{ Path = 'build/docs/docs.csproj'; Framework = 'net10.0' }
+          )
+          foreach ($project in $projects) {
+            $language = dotnet msbuild $project.Path "-p:TargetFramework=$($project.Framework)" -getProperty:LangVersion -nologo
+            if ($LASTEXITCODE -ne 0 -or "$language".Trim() -ne 'latest') {
+              throw "Unexpected language version for $($project.Path) / $($project.Framework): $language"
+            }
+            Write-Host "$($project.Path) / $($project.Framework): C# $language"
+          }
+
+      - name: Build 'new-cli' solution
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        run: dotnet build ./new-cli
+
+      - name: Run Format 'new-cli' solution
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        run: dotnet format ./new-cli --exclude ~/.nuget/packages --verify-no-changes
+
+      - name: Test 'new-cli' solution
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        run: dotnet test --solution ./new-cli/GitVersion.slnx --no-build --verbosity normal

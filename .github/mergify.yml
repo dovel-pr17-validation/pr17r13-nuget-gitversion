@@ -1,0 +1,37 @@
+# $schema: https://docs.mergify.com/mergify-configuration-schema.json
+pull_request_rules:
+  # 1. Handle Dependabot: Approve and Queue for merge
+  - name: Automatic merge and approval for Dependabot
+    conditions:
+      - author~=^dependabot(|-preview)\[bot\]$
+      - check-success=DotNet Format
+      - check-success=Release
+      - check-success=Build & Test (new-cli)
+      # Using repository-name is cleaner than full-name if you just care about the repo name
+      - repository-full-name=GitTools/GitVersion
+    actions:
+      review:
+        type: APPROVE
+        message: "Automatic approval for Dependabot update."
+      queue:
+        name: default
+
+  # 2. Thank human contributors
+  - name: Thank contributor
+    conditions:
+      - merged
+      - -author~=^dependabot(|-preview)\[bot\]$
+    actions:
+      comment:
+        message: "Thank you @{{author}} for your contribution!"
+
+# 3. Use a Queue to handle the "up-to-date" requirement automatically
+queue_rules:
+  - name: default
+    merge_method: merge
+    queue_conditions:
+      - check-success=DotNet Format
+      - check-success=Release
+      - check-success=Build & Test (new-cli)
+merge_protections_settings:
+  reporting_method: check-runs

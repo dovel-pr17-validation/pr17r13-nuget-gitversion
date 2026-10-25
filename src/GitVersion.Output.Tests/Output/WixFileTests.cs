@@ -1,0 +1,110 @@
+using System.Globalization;
+using System.IO.Abstractions;
+using GitVersion.Configuration;
+using GitVersion.Helpers;
+using GitVersion.Output.WixUpdater;
+using GitVersion.Tests;
+using GitVersion.VersionCalculation;
+
+namespace GitVersion.Output.Tests;
+
+[TestFixture]
+[Parallelizable(ParallelScope.None)]
+internal class WixFileTests : TestBase
+{
+    private string workingDir = null!;
+
+    [OneTimeSetUp]
+    public void OneTimeSetUp() => this.workingDir = FileSystemHelper.Path.Combine(FileSystemHelper.Path.GetTempPath(), "WixFileTests");
+
+    [OneTimeTearDown]
+    public void OneTimeTearDown() => FileSystemHelper.Directory.DeleteDirectory(this.workingDir);
+
+    [SetUp]
+    public void Setup() => ShouldlyConfiguration.ShouldMatchApprovedDefaults.LocateTestMethodUsingAttribute<TestAttribute>();
+
+    [Test]
+    public void UpdateWixVersionFile()
+    {
+        var semVer = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            BuildMetaData = new("5.Branch.develop")
+            {
+                VersionSourceSha = "versionSourceSha",
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                CommitDate = DateTimeOffset.Parse("2019-02-20 23:59:59Z", CultureInfo.InvariantCulture)
+            }
+        };
+
+        var stringBuilder = new StringBuilder();
+
+        var loggerFactory = new TestLoggerFactory(s => stringBuilder.AppendLine(s));
+
+        var sp = ConfigureServices(service => loggerFactory.RegisterWith(service));
+
+        var fileSystem = sp.GetRequiredService<IFileSystem>();
+        var variableProvider = sp.GetRequiredService<IVariableProvider>();
+        var configuration = EmptyConfigurationBuilder.New.Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var versionVariables = variableProvider.GetVariablesFor(semVer, configuration, effectiveConfiguration);
+
+        using var wixVersionFileUpdater = sp.GetRequiredService<IWixVersionFileUpdater>();
+
+        wixVersionFileUpdater.Execute(versionVariables, new(this.workingDir));
+
+        var file = FileSystemHelper.Path.Combine(this.workingDir, WixVersionFileUpdater.WixVersionFileName);
+        fileSystem
+            .File.ReadAllText(file)
+            .ShouldMatchApproved(c => c.SubFolder(FileSystemHelper.Path.Combine("Approved")));
+    }
+
+    [Test]
+    public void UpdateWixVersionFileWhenFileAlreadyExists()
+    {
+        var semVer = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            BuildMetaData = new("5.Branch.develop")
+            {
+                VersionSourceSha = "versionSourceSha",
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                CommitDate = DateTimeOffset.Parse("2019-02-20 23:59:59Z", CultureInfo.InvariantCulture)
+            }
+        };
+
+        var stringBuilder = new StringBuilder();
+
+        var loggerFactory = new TestLoggerFactory(s => stringBuilder.AppendLine(s));
+
+        var sp = ConfigureServices(service => loggerFactory.RegisterWith(service));
+
+        var fileSystem = sp.GetRequiredService<IFileSystem>();
+        var variableProvider = sp.GetRequiredService<IVariableProvider>();
+        var configuration = EmptyConfigurationBuilder.New.Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var versionVariables = variableProvider.GetVariablesFor(semVer, configuration, effectiveConfiguration);
+
+        using var wixVersionFileUpdater = sp.GetRequiredService<IWixVersionFileUpdater>();
+
+        // fake an already existing file
+        var file = FileSystemHelper.Path.Combine(this.workingDir, WixVersionFileUpdater.WixVersionFileName);
+        if (!fileSystem.Directory.Exists(this.workingDir))
+        {
+            fileSystem.Directory.CreateDirectory(this.workingDir);
+        }
+        fileSystem.File.WriteAllText(file, new('x', 1024 * 1024));
+
+        wixVersionFileUpdater.Execute(versionVariables, new(this.workingDir));
+
+        fileSystem
+            .File.ReadAllText(file)
+            .ShouldMatchApproved(c => c.SubFolder(FileSystemHelper.Path.Combine("Approved")));
+    }
+}

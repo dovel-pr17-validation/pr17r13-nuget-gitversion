@@ -1,0 +1,61 @@
+using Cake.Incubator.AssertExtensions;
+using Common.Addins.GitVersion;
+
+namespace Common.Utilities;
+
+public record NugetPackage(string PackageName, FilePath FilePath, bool IsChocoPackage);
+
+public record CodeCovCredentials(string Token);
+
+public record GitHubCredentials(string Token, string? UserName = null);
+
+public record NugetCredentials(string ApiKey);
+
+public record DockerHubCredentials(string Username, string Password);
+
+public record ChocolateyCredentials(string ApiKey);
+
+public record BuildVersion(GitVersion GitVersion, string? Version, string? Milestone, string? SemVersion, string? NugetVersion, string? ChocolateyVersion, bool IsPreRelease)
+{
+    public static BuildVersion Calculate(GitVersion gitVersion)
+    {
+        var version = gitVersion.MajorMinorPatch;
+        var semVersion = gitVersion.SemVer;
+        var nugetVersion = gitVersion.SemVer;
+        var chocolateyVersion = gitVersion.MajorMinorPatch;
+
+        if (!string.IsNullOrWhiteSpace(gitVersion.PreReleaseLabel))
+        {
+            // Chocolatey does not support pre-release labels with dots, so we replace them with dashes
+            // if the pre-release label name is a number, we add an "a" prefix to the pre-release label
+            // the trick should be removed when Chocolatey supports semver 2.0
+            var prefix = int.TryParse(gitVersion.PreReleaseLabelName, out _) ? "a" : string.Empty;
+            chocolateyVersion += $"-{prefix}{gitVersion.PreReleaseLabel?.Replace(".", "-")}";
+        }
+
+        if (gitVersion.BuildMetaData is not null)
+        {
+            semVersion += $"-{gitVersion.BuildMetaData}";
+            chocolateyVersion += $"-{gitVersion.BuildMetaData}";
+            nugetVersion += $".{gitVersion.BuildMetaData}";
+        }
+
+        return new(
+            GitVersion: gitVersion,
+            Version: version,
+            Milestone: semVersion,
+            SemVersion: semVersion,
+            NugetVersion: nugetVersion?.ToLowerInvariant(),
+            ChocolateyVersion: chocolateyVersion?.ToLowerInvariant(),
+            IsPreRelease: !gitVersion.PreReleaseLabel.IsNullOrEmpty()
+        );
+    }
+}
+
+public record DockerImage(string Distro, string TargetFramework, Architecture Architecture, string Registry, bool UseBaseImage);
+
+public enum DockerRegistry
+{
+    GitHub = 0,
+    DockerHub = 1
+}

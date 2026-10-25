@@ -1,0 +1,30 @@
+using GitVersion.Extensions;
+using GitVersion.Git;
+using Microsoft.Extensions.Logging;
+
+namespace GitVersion.Commands;
+
+public record CalculateSettings : GitVersionSettings; // NOSONAR: Distinct command settings type inheriting shared options.
+
+[Command("calculate", "Calculates the version object from the git history.")]
+public class CalculateCommand(ILogger<CalculateCommand> logger, IService service, IGitRepository repository) : ICommand<CalculateSettings>
+{
+    private readonly ILogger logger = logger.NotNull();
+    private readonly IService service = service.NotNull();
+    private readonly IGitRepository repository = repository.NotNull();
+
+    public Task<int> InvokeAsync(CalculateSettings settings, CancellationToken cancellationToken = default)
+    {
+        var value = this.service.Call();
+        if (settings.WorkDir != null)
+        {
+            this.repository.DiscoverRepository(settings.WorkDir.FullName);
+            var branches = this.repository.Branches.ToList();
+            this.logger.LogInformation("Command : 'calculate', LogFile : '{LogFile}', WorkDir : '{WorkDir}' ",
+                settings.LogFile, settings.WorkDir);
+            this.logger.LogInformation("Found {count} branches", branches.Count);
+        }
+
+        return Task.FromResult(value);
+    }
+}

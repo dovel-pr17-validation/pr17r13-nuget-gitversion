@@ -1,0 +1,93 @@
+on:
+  workflow_call:
+    outputs:
+      docker_distros:
+        description: 'List of Docker distros'
+        value: ${{ jobs.set_matrix.outputs.docker_distros }}
+      dotnet_versions:
+        description: 'List of .NET versions'
+        value: ${{ jobs.set_matrix.outputs.dotnet_versions }}
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_INSTALL_DIR: "./.dotnet"
+  DOTNET_ROLL_FORWARD: "Major"
+
+jobs:
+  prepare:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-2025-vs2026, ubuntu-24.04, macos-26 ]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache cake frosting
+        id: cache-cake
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: run
+          key: run-${{ runner.os }}-${{ hashFiles('./build/**') }}
+
+      - name: Use cached tools
+        id: cache-tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: tools
+          key: tools-${{ runner.os }}-${{ hashFiles('./build/**', './.gitversion.yml') }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('global.json', '**/*.csproj', '**/*.props', '**/*.targets', 'NuGet.config', 'nuget.config') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+          dotnet-version: '10.0.x'
+
+      - name: '[Build]'
+        if: steps.cache-cake.outputs.cache-hit != 'true'
+        run: dotnet build build/ --configuration=Release
+
+      - name: '[Prepare]'
+        shell: pwsh
+        run: dotnet run/build.dll --target=BuildPrepare
+  set_matrix:
+    needs: [ prepare ]
+    name: Set Matrix
+    runs-on: ubuntu-24.04
+    outputs:
+      docker_distros: ${{ steps.set_matrix.outputs.docker_distros }}
+      dotnet_versions: ${{ steps.set_matrix.outputs.dotnet_versions }}
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Restore State
+        uses: $/.github/actions/cache-restore # NOSONAR -- $/ resolves to the running commit.
+
+      - name: '[Matrix]'
+        id: set_matrix
+        shell: pwsh
+        run: dotnet run/config.dll --target=SetMatrix

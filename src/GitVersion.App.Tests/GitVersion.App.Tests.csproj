@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <ItemGroup>
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
+        <PackageReference Include="JsonSchema.Net" />
+    </ItemGroup>
+    <ItemGroup>
+        <ProjectReference Include="..\GitVersion.Configuration\GitVersion.Configuration.csproj" />
+        <ProjectReference Include="..\GitVersion.Core\GitVersion.Core.csproj" />
+        <ProjectReference Include="..\GitVersion.App\GitVersion.App.csproj" />
+    </ItemGroup>
+    <ItemGroup>
+        <None Include="TestBuildFile.proj" />
+        <None Update="Fixtures\OpenCli\schema.json" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+    <ItemGroup>
+        <Content Include="Approved\**\*.approved.txt" />
+    </ItemGroup>
+    <ItemGroup>
+        <Compile Include="..\GitVersion.Core.Tests\Helpers\TestConsoleAdapter.cs" Link="Helpers\TestConsoleAdapter.cs" />
+        <Compile Include="..\GitVersion.Core.Tests\Helpers\TestEnvironment.cs" Link="Helpers\TestEnvironment.cs" />
+        <Compile Include="..\GitVersion.Core.Tests\Helpers\TestBase.cs" Link="Helpers\TestBase.cs" />
+        <Compile Include="..\GitVersion.Core.Tests\Helpers\GitVersionCoreTestModule.cs" Link="Helpers\GitVersionCoreTestModule.cs" />
+        <Compile Include="..\GitVersion.Core.Tests\Extensions\GitVersionVariablesExtensions.cs" Link="Extensions\GitVersionVariablesExtensions.cs" />
+    </ItemGroup>
+
+</Project>

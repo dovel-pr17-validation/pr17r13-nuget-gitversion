@@ -1,0 +1,563 @@
+using GitVersion.Extensions;
+using GitVersion.Helpers;
+using GitVersion.VersionCalculation;
+
+namespace GitVersion.Configuration;
+
+internal abstract class ConfigurationBuilderBase<TConfigurationBuilder> : IConfigurationBuilder
+    where TConfigurationBuilder : ConfigurationBuilderBase<TConfigurationBuilder>
+{
+    private AssemblyVersioningScheme? assemblyVersioningScheme;
+    private AssemblyFileVersioningScheme? assemblyFileVersioningScheme;
+    private string? assemblyInformationalFormat;
+    private string? assemblyVersioningFormat;
+    private string? assemblyFileVersioningFormat;
+    private string? customVersionFormat;
+    private string? tagPrefix;
+    private string? versionInBranchPattern;
+    private string? nextVersion;
+    private string? majorVersionBumpMessage;
+    private string? minorVersionBumpMessage;
+    private string? patchVersionBumpMessage;
+    private string? noBumpMessage;
+    private string? versionBumpResetMessage;
+    private int? tagPreReleaseWeight;
+    private IgnoreConfiguration ignore = new();
+    private string? commitDateFormat;
+    private bool updateBuildNumber;
+    private SemanticVersionFormat semanticVersionFormat;
+    private VersionStrategies[] versionStrategies = [];
+    private Dictionary<string, string> mergeMessageFormats = [];
+    private readonly List<IReadOnlyDictionary<object, object?>> overrides = [];
+    private readonly Dictionary<string, BranchConfigurationBuilder> branchConfigurationBuilders = [];
+    private DeploymentMode? versioningMode;
+    private string? label;
+    private IncrementStrategy increment = IncrementStrategy.Inherit;
+    private bool? preventIncrementOfMergedBranch;
+    private bool? preventIncrementWhenBranchMerged;
+    private bool? preventIncrementWhenCurrentCommitTagged;
+    private bool? trackMergeTarget;
+    private bool? trackMergeMessage;
+    private CommitMessageIncrementMode? commitMessageIncrementing;
+    private string? regularExpression;
+    private bool? tracksReleaseBranches;
+    private bool? isReleaseBranch;
+    private bool? isMainBranch;
+    private int? preReleaseWeight;
+
+    protected readonly BranchMetaData MainBranch = new()
+    {
+        Name = ConfigurationConstants.MainBranchKey,
+        RegexPattern = RegexPatterns.Configuration.MainBranchRegexPattern
+    };
+
+    protected readonly BranchMetaData DevelopBranch = new()
+    {
+        Name = ConfigurationConstants.DevelopBranchKey,
+        RegexPattern = RegexPatterns.Configuration.DevelopBranchRegexPattern
+    };
+
+    protected readonly BranchMetaData ReleaseBranch = new()
+    {
+        Name = ConfigurationConstants.ReleaseBranchKey,
+        RegexPattern = RegexPatterns.Configuration.ReleaseBranchRegexPattern
+    };
+
+    protected readonly BranchMetaData FeatureBranch = new()
+    {
+        Name = ConfigurationConstants.FeatureBranchKey,
+        RegexPattern = RegexPatterns.Configuration.FeatureBranchRegexPattern
+    };
+
+    protected readonly BranchMetaData PullRequestBranch = new()
+    {
+        Name = ConfigurationConstants.PullRequestBranchKey,
+        RegexPattern = RegexPatterns.Configuration.PullRequestBranchRegexPattern
+    };
+
+    protected readonly BranchMetaData HotfixBranch = new()
+    {
+        Name = ConfigurationConstants.HotfixBranchKey,
+        RegexPattern = RegexPatterns.Configuration.HotfixBranchRegexPattern
+    };
+
+    protected readonly BranchMetaData SupportBranch = new()
+    {
+        Name = ConfigurationConstants.SupportBranchKey,
+        RegexPattern = RegexPatterns.Configuration.SupportBranchRegexPattern
+    };
+
+    protected readonly BranchMetaData UnknownBranch = new()
+    {
+        Name = ConfigurationConstants.UnknownBranchKey,
+        RegexPattern = RegexPatterns.Configuration.UnknownBranchRegexPattern
+    };
+
+    protected ConfigurationBuilderBase()
+    {
+        if (GetType() != typeof(TConfigurationBuilder))
+        {
+            throw new ArgumentException("The generic type parameter is not equal to the instance type.");
+        }
+    }
+
+    public TConfigurationBuilder WithAssemblyVersioningScheme(AssemblyVersioningScheme? value)
+    {
+        this.assemblyVersioningScheme = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithAssemblyFileVersioningScheme(AssemblyFileVersioningScheme? value)
+    {
+        this.assemblyFileVersioningScheme = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithAssemblyInformationalFormat(string? value)
+    {
+        this.assemblyInformationalFormat = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithAssemblyVersioningFormat(string? value)
+    {
+        this.assemblyVersioningFormat = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithAssemblyFileVersioningFormat(string? value)
+    {
+        this.assemblyFileVersioningFormat = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithCustomVersionFormat(string? value)
+    {
+        this.customVersionFormat = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithTagPrefixPattern(string? value)
+    {
+        this.tagPrefix = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithVersionInBranchPattern(string? value)
+    {
+        this.versionInBranchPattern = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithNextVersion(string? value)
+    {
+        this.nextVersion = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithMajorVersionBumpMessage(string? value)
+    {
+        this.majorVersionBumpMessage = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithMinorVersionBumpMessage(string? value)
+    {
+        this.minorVersionBumpMessage = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithPatchVersionBumpMessage(string? value)
+    {
+        this.patchVersionBumpMessage = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithNoBumpMessage(string? value)
+    {
+        this.noBumpMessage = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithVersionBumpResetMessage(string? value)
+    {
+        this.versionBumpResetMessage = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithTagPreReleaseWeight(int? value)
+    {
+        this.tagPreReleaseWeight = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithIgnoreConfiguration(IIgnoreConfiguration value)
+    {
+        this.ignore = (IgnoreConfiguration)value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithCommitDateFormat(string? value)
+    {
+        this.commitDateFormat = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithUpdateBuildNumber(bool value)
+    {
+        this.updateBuildNumber = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithSemanticVersionFormat(SemanticVersionFormat value)
+    {
+        this.semanticVersionFormat = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithVersionStrategy(VersionStrategies value)
+    {
+        this.versionStrategies = [.. Enum.GetValues<VersionStrategies>().Where(element => element != VersionStrategies.None && value.HasFlag(element))];
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithVersionStrategies(params VersionStrategies[] values)
+    {
+        this.versionStrategies = values;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithMergeMessageFormats(IReadOnlyDictionary<string, string> value)
+    {
+        this.mergeMessageFormats = new(value);
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithoutBranches()
+    {
+        this.branchConfigurationBuilders.Clear();
+        return (TConfigurationBuilder)this;
+    }
+
+    public BranchConfigurationBuilder WithBranch(string value)
+        => this.branchConfigurationBuilders.GetOrAdd(value, () => BranchConfigurationBuilder.New);
+
+    public BranchConfigurationBuilder WithBranch(string value, BranchConfigurationBuilder builder)
+        => this.branchConfigurationBuilders.GetOrAdd(value, () => builder);
+
+    public TConfigurationBuilder WithBranch(string value, Action<BranchConfigurationBuilder> action)
+    {
+        var result = this.branchConfigurationBuilders.GetOrAdd(value, () => BranchConfigurationBuilder.New);
+        action(result);
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithDeploymentMode(DeploymentMode? value)
+    {
+        this.versioningMode = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithLabel(string? value)
+    {
+        this.label = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithIncrement(IncrementStrategy value)
+    {
+        this.increment = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithPreventIncrementOfMergedBranch(bool? value)
+    {
+        this.preventIncrementOfMergedBranch = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithPreventIncrementWhenBranchMerged(bool? value)
+    {
+        this.preventIncrementWhenBranchMerged = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithPreventIncrementWhenCurrentCommitTagged(bool? value)
+    {
+        this.preventIncrementWhenCurrentCommitTagged = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithTrackMergeTarget(bool? value)
+    {
+        this.trackMergeTarget = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithTrackMergeMessage(bool? value)
+    {
+        this.trackMergeMessage = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithCommitMessageIncrementing(CommitMessageIncrementMode? value)
+    {
+        this.commitMessageIncrementing = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithRegularExpression(string? value)
+    {
+        this.regularExpression = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithTracksReleaseBranches(bool? value)
+    {
+        this.tracksReleaseBranches = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithIsReleaseBranch(bool? value)
+    {
+        this.isReleaseBranch = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithIsMainBranch(bool? value)
+    {
+        this.isMainBranch = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithPreReleaseWeight(int? value)
+    {
+        this.preReleaseWeight = value;
+        return (TConfigurationBuilder)this;
+    }
+
+    public TConfigurationBuilder WithConfiguration(IGitVersionConfiguration value)
+    {
+        var calculation = value.Calculation;
+        var output = value.Output;
+        WithAssemblyVersioningScheme(output.AssemblyVersioningScheme);
+        WithAssemblyFileVersioningScheme(output.AssemblyFileVersioningScheme);
+        WithAssemblyInformationalFormat(output.AssemblyInformationalFormat);
+        WithAssemblyVersioningFormat(output.AssemblyVersioningFormat);
+        WithAssemblyFileVersioningFormat(output.AssemblyFileVersioningFormat);
+        WithCustomVersionFormat(output.CustomVersionFormat);
+        WithTagPrefixPattern(calculation.TagPrefixPattern);
+        WithVersionInBranchPattern(calculation.VersionInBranchPattern);
+        WithNextVersion(calculation.NextVersion);
+        WithMajorVersionBumpMessage(calculation.MajorVersionBumpMessage);
+        WithMinorVersionBumpMessage(calculation.MinorVersionBumpMessage);
+        WithPatchVersionBumpMessage(calculation.PatchVersionBumpMessage);
+        WithNoBumpMessage(calculation.NoBumpMessage);
+        WithVersionBumpResetMessage(calculation.VersionBumpResetMessage);
+        WithTagPreReleaseWeight(output.TagPreReleaseWeight);
+        WithIgnoreConfiguration(calculation.Ignore);
+        WithCommitDateFormat(output.CommitDateFormat);
+        WithUpdateBuildNumber(output.UpdateBuildNumber);
+        WithSemanticVersionFormat(calculation.SemanticVersionFormat);
+        WithVersionStrategy(calculation.VersionStrategy);
+        WithMergeMessageFormats(calculation.MergeMessageFormats);
+        foreach (var (name, branchConfiguration) in value.Branches)
+        {
+            WithBranch(name).WithConfiguration(branchConfiguration);
+        }
+        WithDeploymentMode(calculation.DeploymentMode);
+        WithLabel(calculation.Label);
+        WithIncrement(calculation.Increment);
+        WithPreventIncrementOfMergedBranch(calculation.PreventIncrement.OfMergedBranch);
+        WithPreventIncrementWhenBranchMerged(calculation.PreventIncrement.WhenBranchMerged);
+        WithPreventIncrementWhenCurrentCommitTagged(calculation.PreventIncrement.WhenCurrentCommitTagged);
+        WithTrackMergeTarget(calculation.TrackMergeTarget);
+        WithTrackMergeMessage(calculation.TrackMergeMessage);
+        WithCommitMessageIncrementing(calculation.CommitMessageIncrementing);
+        WithRegularExpression(calculation.RegularExpression);
+        WithTracksReleaseBranches(calculation.TracksReleaseBranches);
+        WithIsReleaseBranch(calculation.IsReleaseBranch);
+        WithIsMainBranch(calculation.IsMainBranch);
+        WithPreReleaseWeight(output.PreReleaseWeight);
+        return (TConfigurationBuilder)this;
+    }
+
+    public void AddOverride(IReadOnlyDictionary<object, object?> value)
+    {
+        if (value.Any())
+        {
+            this.overrides.Add(value);
+        }
+    }
+
+    public virtual IGitVersionConfiguration Build()
+    {
+        Dictionary<string, BranchConfiguration> branches = [];
+        foreach (var (name, branchConfigurationBuilder) in this.branchConfigurationBuilders)
+        {
+            branches.Add(name, (BranchConfiguration)branchConfigurationBuilder.Build());
+        }
+
+        IGitVersionConfiguration configuration = new GitVersionConfiguration
+        {
+            AssemblyVersioningScheme = this.assemblyVersioningScheme,
+            AssemblyFileVersioningScheme = this.assemblyFileVersioningScheme,
+            AssemblyInformationalFormat = this.assemblyInformationalFormat,
+            AssemblyVersioningFormat = this.assemblyVersioningFormat,
+            AssemblyFileVersioningFormat = this.assemblyFileVersioningFormat,
+            CustomVersionFormat = this.customVersionFormat,
+            TagPrefixPattern = this.tagPrefix,
+            VersionInBranchPattern = this.versionInBranchPattern,
+            NextVersion = this.nextVersion,
+            MajorVersionBumpMessage = this.majorVersionBumpMessage,
+            MinorVersionBumpMessage = this.minorVersionBumpMessage,
+            PatchVersionBumpMessage = this.patchVersionBumpMessage,
+            NoBumpMessage = this.noBumpMessage,
+            VersionBumpResetMessage = this.versionBumpResetMessage,
+            TagPreReleaseWeight = this.tagPreReleaseWeight,
+            Ignore = this.ignore,
+            CommitDateFormat = this.commitDateFormat,
+            UpdateBuildNumber = this.updateBuildNumber,
+            SemanticVersionFormat = this.semanticVersionFormat,
+            VersionStrategies = this.versionStrategies,
+            Branches = branches,
+            MergeMessageFormats = this.mergeMessageFormats,
+            DeploymentMode = this.versioningMode,
+            Label = this.label,
+            Increment = this.increment,
+            RegularExpression = this.regularExpression,
+            TracksReleaseBranches = this.tracksReleaseBranches,
+            TrackMergeTarget = this.trackMergeTarget,
+            TrackMergeMessage = this.trackMergeMessage,
+            CommitMessageIncrementing = this.commitMessageIncrementing,
+            IsMainBranch = this.isMainBranch,
+            IsReleaseBranch = this.isReleaseBranch,
+            PreventIncrement = new PreventIncrementConfiguration
+            {
+                OfMergedBranch = this.preventIncrementOfMergedBranch,
+                WhenBranchMerged = this.preventIncrementWhenBranchMerged,
+                WhenCurrentCommitTagged = this.preventIncrementWhenCurrentCommitTagged
+            },
+            PreReleaseWeight = this.preReleaseWeight
+        };
+
+        if (this.overrides.Count != 0)
+        {
+            ConfigurationHelper configurationHelper = new(configuration);
+            foreach (var item in this.overrides)
+            {
+                configurationHelper.Override(item);
+            }
+            configuration = configurationHelper.Configuration;
+        }
+
+        FinalizeConfiguration(configuration);
+        ValidateConfiguration(configuration);
+
+        return configuration;
+    }
+
+    private static void FinalizeConfiguration(IGitVersionConfiguration configuration)
+    {
+        foreach (var (name, branchConfiguration) in configuration.Branches)
+        {
+            FinalizeBranchConfiguration(configuration, name, branchConfiguration);
+        }
+    }
+
+    private static void FinalizeBranchConfiguration(IGitVersionConfiguration configuration, string branchName,
+        IBranchConfiguration branchConfiguration)
+    {
+        var branches = configuration.Branches;
+        foreach (var targetBranchName in branchConfiguration.IsSourceBranchFor)
+        {
+            if (!branches.TryGetValue(targetBranchName, out var target))
+            {
+                throw new ConfigurationValidationException("GVCONFIG_BRANCH", PublicPath($"branches.{branchName}.is-source-branch-for"), "Referenced branch configuration does not exist.");
+            }
+
+            var targetBranchConfiguration = (BranchConfiguration)target;
+            targetBranchConfiguration.SourceBranches.Add(branchName);
+        }
+    }
+
+    private static void ValidateConfiguration(IGitVersionConfiguration configuration)
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(configuration.NextVersion)
+                && !SemanticVersion.TryParse(configuration.NextVersion, null, out _, configuration.SemanticVersionFormat))
+            {
+                throw new ConfigurationValidationException("GVCONFIG_VALUE", PublicPath("next-version"), "Expected a semantic version.");
+            }
+        }
+        catch (OverflowException)
+        {
+            throw new ConfigurationValidationException("GVCONFIG_VALUE", PublicPath("next-version"), "Semantic version components exceed the supported range.");
+        }
+        ValidateIgnoreExpressions("ignore.branches", configuration.Ignore.Branches);
+        ValidateIgnoreExpressions("ignore.tags", configuration.Ignore.Tags);
+        ValidateIgnoreExpressions("ignore.paths", configuration.Ignore.Paths);
+        ValidateRegex("tag-prefix", configuration.TagPrefixPattern);
+        ValidateRegex("version-in-branch-pattern", configuration.VersionInBranchPattern);
+        ValidateRegex("major-version-bump-message", configuration.MajorVersionBumpMessage);
+        ValidateRegex("minor-version-bump-message", configuration.MinorVersionBumpMessage);
+        ValidateRegex("patch-version-bump-message", configuration.PatchVersionBumpMessage);
+        ValidateRegex("no-bump-message", configuration.NoBumpMessage);
+        ValidateRegex("version-bump-reset-message", configuration.VersionBumpResetMessage);
+        ValidateRegex("regex", configuration.RegularExpression);
+        foreach (var (key, expression) in configuration.MergeMessageFormats)
+        {
+            ValidateRegex($"merge-message-formats.{key}", expression);
+        }
+
+        foreach (var (name, branchConfiguration) in configuration.Branches)
+        {
+            var helpUrl = $"{FileSystemHelper.Path.NewLine}See https://gitversion.net/docs/reference/configuration for more info";
+
+            if (branchConfiguration.RegularExpression == null)
+            {
+                throw new ConfigurationValidationException("GVCONFIG_BRANCH", PublicPath($"branches.{name}.regex"), "Branch configuration requires a regex.");
+            }
+            ValidateRegex($"branches.{name}.regex", branchConfiguration.RegularExpression);
+
+            var sourceBranches = branchConfiguration.SourceBranches ?? throw new ConfigurationException($"Branch configuration '{name}' is missing required configuration 'source-branches'{helpUrl}");
+            var missingSourceBranches = sourceBranches.Where(sb => !configuration.Branches.ContainsKey(sb)).ToArray();
+            if (missingSourceBranches.Length != 0)
+            {
+                throw new ConfigurationValidationException("GVCONFIG_BRANCH", PublicPath($"branches.{name}.source-branches"), "Referenced branch configuration does not exist.");
+            }
+        }
+    }
+
+    private static void ValidateIgnoreExpressions(string propertyName, IEnumerable<string> expressions)
+    {
+        foreach (var expression in expressions)
+        {
+            ValidateRegex(propertyName, expression);
+        }
+    }
+
+    private static string PublicPath(string path) => ConfigurationVersionSelector.Resolve() == ConfigurationVersion.V7 ? "calculation." + path : path;
+
+    private static void ValidateRegex(string path, string? expression)
+    {
+        if (expression is null)
+        {
+            return;
+        }
+
+        try { _ = RegexPatterns.Cache.GetOrAdd(expression); }
+        catch (ArgumentException)
+        {
+            throw new ConfigurationValidationException("GVCONFIG_REGEX", PublicPath(path), "Invalid regular expression.");
+        }
+    }
+
+    protected record BranchMetaData
+    {
+        public required string Name { get; init; }
+
+        public required string RegexPattern { get; init; }
+    }
+}

@@ -1,0 +1,63 @@
+name: 'Docker Publish'
+description: 'Docker Publish Images'
+inputs:
+  arch:
+    description: 'Docker architecture'
+    required: true
+  docker_distro:
+    description: 'Linux Distro'
+    required: true
+  dotnet_version:
+    description: '.net version'
+    required: true
+  dockerhub_organization:
+    description: 'Docker Hub organization'
+    required: true
+  dockerhub_oidc_connection_id:
+    description: 'Docker Hub OIDC connection ID'
+    required: true
+  github_registry_username:
+    description: 'GitHub Registry Username'
+    required: true
+  github_registry_password:
+    description: 'GitHub Registry Password'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Login to DockerHub
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      env:
+        DOCKERHUB_OIDC_CONNECTIONID: ${{ inputs.dockerhub_oidc_connection_id }}
+      with:
+        username: ${{ inputs.dockerhub_organization }}
+
+    - name: '[Docker Publish] DockerHub'
+      shell: pwsh
+      env:
+        ARCH: ${{ inputs.arch }}
+        DOTNET_VERSION: ${{ inputs.dotnet_version }}
+        DOCKER_DISTRO: ${{ inputs.docker_distro }}
+      run: |
+        dotnet run/docker.dll `
+              --target=DockerPublish --arch=$env:ARCH --dotnet_version=$env:DOTNET_VERSION `
+              --docker_distro=$env:DOCKER_DISTRO --docker_registry dockerhub --verbosity=diagnostic
+
+    - name: Login to GitHub
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: ghcr.io
+        username: ${{ inputs.github_registry_username }}
+        password: ${{ inputs.github_registry_password }}
+
+    - name: '[Docker Publish] GitHub'
+      shell: pwsh
+      env:
+        ARCH: ${{ inputs.arch }}
+        DOTNET_VERSION: ${{ inputs.dotnet_version }}
+        DOCKER_DISTRO: ${{ inputs.docker_distro }}
+      run: |
+        dotnet run/docker.dll `
+              --target=DockerPublish --arch=$env:ARCH --dotnet_version=$env:DOTNET_VERSION `
+              --docker_distro=$env:DOCKER_DISTRO --docker_registry github --verbosity=diagnostic

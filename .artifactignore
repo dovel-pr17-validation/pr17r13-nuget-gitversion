@@ -1,0 +1,8 @@
+**/*
+
+artifacts/build-artifact
+artifacts/test-results
+!artifacts/*/nuget
+
+!artifacts/*/*.tar.gz
+!artifacts/gitversion.json

@@ -1,0 +1,62 @@
+using Common.Context;
+using Common.Utilities;
+
+namespace Common.Lifetime;
+
+public abstract class DockerBuildLifetime<TContext> : BuildLifetimeBase<TContext>
+    where TContext : DockerBuildContext
+{
+    protected virtual bool UseBaseImage => false;
+
+    public override void Setup(TContext context, ISetupContext info)
+    {
+        base.Setup(context, info);
+
+        if (!context.UseDocker)
+        {
+            return;
+        }
+
+        context.IsDockerOnLinux = context.DockerCustomCommand("info --format '{{.OSType}}'").First().Replace("'", string.Empty) == "linux";
+
+        var dockerRegistry = context.Argument(Arguments.DockerRegistry, DockerRegistry.DockerHub);
+        var dotnetVersion = context.Argument(Arguments.DotnetVersion, string.Empty).ToLower();
+        var dockerDistro = context.Argument(Arguments.DockerDistro, string.Empty).ToLower();
+
+        var versions = dotnetVersion switch
+        {
+            _ when dotnetVersion.IsNullOrWhiteSpace() => Constants.DotnetVersions,
+            _ when dotnetVersion.IsEqualInvariant("lts-latest") => [Constants.DotnetLtsLatest],
+            _ => [dotnetVersion]
+        };
+
+        var distros = dockerDistro switch
+        {
+            _ when dockerDistro.IsNullOrWhiteSpace() => Constants.DockerDistros,
+            _ when dockerDistro.IsEqualInvariant("distro-latest") => [Constants.AlpineLatest],
+            _ => [dockerDistro]
+        };
+
+        var architectures = context.HasArgument(Arguments.Architecture)
+            ? context.Arguments<Architecture>(Arguments.Architecture)
+            : Constants.ArchToBuild;
+        var platformArch = context.IsRunningOnAmd64() ? Architecture.Amd64 : Architecture.Arm64;
+
+        var registry = dockerRegistry == DockerRegistry.DockerHub ? Constants.DockerHubRegistry : Constants.GitHubContainerRegistry;
+
+        context.DockerRegistry = dockerRegistry;
+        context.Architectures = architectures;
+        context.Images = from version in versions
+                         from distro in distros
+                         from arch in architectures
+                         select new DockerImage(distro, version, arch, registry, UseBaseImage);
+
+        context.StartGroup("Build Setup");
+
+        LogBuildInformation(context);
+
+        context.Information($"IsDockerOnLinux:      {context.IsDockerOnLinux}");
+        context.Information($"Building for Version: {dotnetVersion}, Distro: {dockerDistro}, Architecture: {platformArch}");
+        context.EndGroup();
+    }
+}

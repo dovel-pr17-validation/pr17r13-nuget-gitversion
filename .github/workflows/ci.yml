@@ -1,0 +1,240 @@
+name: CI
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+      - 'fix/*'
+      - 'feature/*'
+      - 'poc/*'
+      - 'support/*'
+      - 'next/*'
+    paths:
+      - '**'
+      - '!docs/**'
+
+  pull_request:
+    branches:
+      - main
+      - 'support/*'
+      - 'next/*'
+    paths:
+      - '**'
+      - '!docs/**'
+  merge_group:
+    types: [ checks_requested ]
+
+  repository_dispatch:
+    types: [ ci-release ]
+
+env:
+  DOTNET_ROLL_FORWARD: "Major"
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+  DOTNET_NOLOGO: 1
+  TESTINGPLATFORM_TELEMETRY_OPTOUT: 1
+
+  ENABLED_DIAGNOSTICS: ${{ vars.ENABLED_DIAGNOSTICS }}
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare
+    permissions:
+      contents: read
+    uses: $/.github/workflows/_prepare.yml # NOSONAR -- $/ resolves to the running commit.
+
+  publish_flags:
+    name: Publish Flags
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      can_publish: ${{ steps.flags.outputs.can_publish }}
+      run_full_validation: ${{ steps.flags.outputs.run_full_validation }}
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Resolve publish flag
+        id: flags
+        shell: bash
+        run: |
+          echo "can_publish=${{ github.repository == 'GitTools/GitVersion' && github.ref_name == 'main' }}" >> "$GITHUB_OUTPUT"
+          echo "run_full_validation=${{ github.repository == 'GitTools/GitVersion' && (github.ref_name == 'main' || github.event_name == 'merge_group' || github.event_name == 'repository_dispatch') }}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build & Package
+    needs: [ prepare ]
+    permissions:
+      contents: read
+    uses: $/.github/workflows/_build.yml # NOSONAR -- $/ resolves to the running commit.
+
+  unit_test:
+    name: Test
+    needs: [ prepare, publish_flags ]
+    permissions:
+      contents: read
+      id-token: write
+    uses: $/.github/workflows/_unit_tests.yml # NOSONAR -- $/ resolves to the running commit.
+    with:
+      dotnet_versions: ${{ needs.prepare.outputs.dotnet_versions }}
+      publish_coverage: ${{ fromJson(needs.publish_flags.outputs.can_publish) }}
+
+  artifacts_windows_test:
+    name: Artifacts Windows
+    needs: [ build, publish_flags ]
+    permissions:
+      contents: read
+    uses: $/.github/workflows/_artifacts_windows.yml # NOSONAR -- $/ resolves to the running commit.
+    with:
+      packages: '["Executable", "MsBuildFull"]'
+
+  artifacts_linux_test:
+    needs: [ prepare, build, publish_flags ]
+    name: Artifacts Linux (${{ matrix.arch }})
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    uses: $/.github/workflows/_artifacts_linux.yml # NOSONAR -- $/ resolves to the running commit.
+    with:
+      runner: ${{ matrix.runner }}
+      arch: ${{ matrix.arch }}
+      docker_distros: ${{ fromJson(needs.publish_flags.outputs.run_full_validation) && needs.prepare.outputs.docker_distros || '["ubuntu.24.04"]' }}
+      dotnet_versions: ${{ needs.prepare.outputs.dotnet_versions }}
+
+  docker_linux_images:
+    needs: [ prepare, build, publish_flags ]
+    name: Docker Images (${{ matrix.arch }})
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    uses: $/.github/workflows/_docker.yml # NOSONAR -- $/ resolves to the running commit.
+    with:
+      runner: ${{ matrix.runner }}
+      arch: ${{ matrix.arch }}
+      docker_distros: ${{ fromJson(needs.publish_flags.outputs.run_full_validation) && needs.prepare.outputs.docker_distros || '["ubuntu.24.04"]' }}
+      dotnet_versions: ${{ needs.prepare.outputs.dotnet_versions }}
+      publish_images: ${{ fromJson(needs.publish_flags.outputs.can_publish) }}
+      dockerhub_oidc_connection_id: ${{ vars.DOCKERHUB_OIDC_CONNECTIONID }}
+
+  docker_linux_manifests:
+    needs: [ prepare, docker_linux_images, publish_flags ]
+    name: Docker Manifests
+    if: fromJson(needs.publish_flags.outputs.can_publish)
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    uses: $/.github/workflows/_docker_manifests.yml # NOSONAR -- $/ resolves to the running commit.
+    with:
+      docker_distros: ${{ needs.prepare.outputs.docker_distros }}
+      dotnet_versions: ${{ needs.prepare.outputs.dotnet_versions }}
+      publish_manifests: ${{ fromJson(needs.publish_flags.outputs.can_publish) }}
+      dockerhub_oidc_connection_id: ${{ vars.DOCKERHUB_OIDC_CONNECTIONID }}
+
+  publish:
+    name: Publish
+    needs: [ artifacts_windows_test, artifacts_linux_test, publish_flags ]
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    uses: $/.github/workflows/_publish.yml # NOSONAR -- $/ resolves to the running commit.
+    with:
+      publish_packages: ${{ fromJson(needs.publish_flags.outputs.can_publish) }}
+    secrets:
+      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+
+  release:
+    name: Release
+    needs: [ publish, docker_linux_manifests ]
+    if: ${{ always() && needs.publish.result == 'success' && (needs.docker_linux_manifests.result == 'success' || needs.docker_linux_manifests.result == 'skipped') }}
+    runs-on: windows-2025-vs2026
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+      issues: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      CAN_PUBLISH: ${{ github.event_name == 'repository_dispatch' }}
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Restore State
+        uses: $/.github/actions/cache-restore # NOSONAR -- $/ resolves to the running commit.
+
+      - name: Restore Artifacts
+        uses: $/.github/actions/artifacts-restore # NOSONAR -- $/ resolves to the running commit.
+
+      - name: Attestation
+        if: env.CAN_PUBLISH == 'true'
+        uses: $/.github/actions/artifacts-attest # NOSONAR -- $/ resolves to the running commit.
+
+      - name: Load DockerHub credentials
+        id: dockerhub-creds
+        if: env.CAN_PUBLISH == 'true'
+        uses: gittools/cicd/dockerhub-creds@824c3d773fb5d1b00c26b474ae88b7ce9ae555ee # v5
+        with:
+          op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+
+      - name: DockerHub Publish Readme
+        if: env.CAN_PUBLISH == 'true'
+        shell: pwsh
+        run: dotnet run/docker.dll --target=DockerHubReadmePublish
+        env:
+          DOCKER_USERNAME: ${{ steps.dockerhub-creds.outputs.docker_username }}
+          DOCKER_PASSWORD: ${{ steps.dockerhub-creds.outputs.docker_password }}
+
+      - name: '[Release]'
+        shell: pwsh
+        run: dotnet run/release.dll --target=PublishRelease
+
+      - name: '[Publish Release]'
+        if: github.event_name == 'repository_dispatch'
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          event-type: publish-release
+          client-payload: |
+            {
+              "ref": "${{ github.ref }}",
+              "sha": "${{ github.sha }}",
+              "tag": "${{ github.event.client_payload.tag }}"
+            }

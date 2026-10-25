@@ -1,0 +1,827 @@
+using System.CommandLine;
+using System.CommandLine.Help;
+using System.IO.Abstractions;
+using System.Text.Json;
+using GitVersion.Configuration;
+using GitVersion.Extensions;
+using GitVersion.FileSystemGlobbing;
+using GitVersion.Helpers;
+using GitVersion.Logging;
+using GitVersion.OutputVariables;
+using Serilog.Core;
+using Serilog.Events;
+
+namespace GitVersion;
+
+internal class ArgumentParser(
+    IEnvironment environment,
+    IFileSystem fileSystem,
+    IConsole console,
+    IGlobbingResolver globbingResolver,
+    LoggingLevelSwitch loggingLevelSwitch,
+    CliSchemaExporter cliSchemaExporter
+)
+    : IArgumentParser
+{
+    private readonly IEnvironment environment = environment.NotNull();
+    private readonly IFileSystem fileSystem = fileSystem.NotNull();
+    private readonly IConsole console = console.NotNull();
+    private readonly IGlobbingResolver globbingResolver = globbingResolver.NotNull();
+    private readonly LoggingLevelSwitch loggingLevelSwitch = loggingLevelSwitch.NotNull();
+    private readonly CliSchemaExporter cliSchemaExporter = cliSchemaExporter.NotNull();
+
+    private const string DefaultOutputFileName = "GitVersion.json";
+    private static readonly IEnumerable<string> availableVariables = GitVersionVariables.AvailableVariables;
+
+    private static readonly Dictionary<Verbosity, LogEventLevel> VerbosityMaps = new()
+    {
+        { Verbosity.Verbose, LogEventLevel.Verbose },
+        { Verbosity.Diagnostic, LogEventLevel.Debug },
+        { Verbosity.Normal, LogEventLevel.Information },
+        { Verbosity.Minimal, LogEventLevel.Warning },
+        { Verbosity.Quiet, LogEventLevel.Error }
+    };
+
+    // Build the command schema at once — it's stateless and safe to reuse across calls.
+    private static readonly Lazy<(RootCommand Root, CommandOptions Options, IReadOnlyDictionary<Symbol, CliSchemaValues> Values)> commandFactory = new(BuildCommand);
+
+    public Arguments ParseArguments(string commandLineArguments) =>
+        ParseArguments(QuotedStringHelpers.SplitUnquoted(commandLineArguments, ' '));
+
+    public Arguments ParseArguments(string[] commandLineArguments)
+    {
+        var (rootCommand, options, values) = commandFactory.Value;
+        var parseResult = rootCommand.Parse(commandLineArguments);
+        var schemaRequested = parseResult.GetResult(options.CliSchema) is { Implicit: false };
+
+        ValidateParsedResult(parseResult, options, schemaRequested);
+
+        if (schemaRequested)
+        {
+            try
+            {
+                var schema = this.cliSchemaExporter.Export(rootCommand, values);
+                this.console.WriteLine(schema);
+            }
+            catch (Exception exception) when (exception is JsonException or NotSupportedException or IOException)
+            {
+                throw new WarningException($"Could not export the CLI schema: {exception.Message}");
+            }
+            return new Arguments { IsCliSchema = true };
+        }
+
+        if (IsOptionExplicitlySet<HelpOption>())
+        {
+            parseResult.Invoke();
+            return new Arguments { IsHelp = true };
+        }
+        if (IsOptionExplicitlySet<VersionOption>())
+        {
+            parseResult.Invoke();
+            return new Arguments { IsVersion = true };
+        }
+
+        if (parseResult.CommandResult.Command == options.ConfigCommand)
+        {
+            throw new WarningException("The 'config' command requires a subcommand. Use 'gitversion config get', 'gitversion config validate' or 'gitversion config migrate'.");
+        }
+
+        if (parseResult.CommandResult.Command == options.Validate)
+        {
+            return MapValidationValues(parseResult, options, rootCommand);
+        }
+
+        if (parseResult.CommandResult.Command == options.Migrate)
+        {
+            return MapMigrationValues(parseResult, options);
+        }
+
+        if (parseResult.CommandResult.Command == options.Get)
+        {
+            return MapQueryValues(parseResult, options, rootCommand);
+        }
+
+        var arguments = new Arguments();
+        AddAuthentication(arguments);
+        MapParsedValues(arguments, parseResult, options);
+        ValidateConfigurationFile(arguments);
+
+        return arguments;
+
+        bool IsOptionExplicitlySet<T>() where T : Option
+        {
+            var option = rootCommand.Options.SingleOfType<T>();
+            return parseResult.GetResult(option) is { Implicit: false };
+        }
+    }
+
+    private static Arguments MapValidationValues(ParseResult parseResult, CommandOptions options, RootCommand rootCommand)
+    {
+        var unsupported = rootCommand.Options.Except(options.Validate.Options)
+            .FirstOrDefault(option => parseResult.GetResult(option) is { Implicit: false });
+        var format = parseResult.GetValue(options.ValidationFormat);
+        string? error = null;
+        if (unsupported is not null)
+        {
+            error = $"Option '{unsupported.Name}' cannot be used with 'config validate'.";
+        }
+        else if (format is not null and not "json")
+        {
+            error = "config validate --format supports only json.";
+        }
+
+        return new Arguments
+        {
+            ValidateConfiguration = true,
+            ConfigurationFile = parseResult.GetValue(options.Config),
+            TargetPath = parseResult.GetValue(options.TargetPath) ?? parseResult.GetValue(options.Path) ?? SysEnv.CurrentDirectory,
+            ValidationJson = format == "json",
+            ValidationOverrides = parseResult.GetValue(options.OverrideConfig) ?? [],
+            ValidationError = error
+        };
+    }
+
+    private static void ValidateParsedResult(ParseResult parseResult, CommandOptions options, bool schemaRequested)
+    {
+        // The last terminating option selects System.CommandLine's validation policy.
+        // A schema request takes precedence even when --version follows it. Skip value
+        // validation for this informational operation, but retain unmatched-token checks.
+        if (!schemaRequested && parseResult.Errors.Count > 0)
+        {
+            var message = parseResult.Errors[0].Message;
+            var token = message.Contains("Unrecognized command or argument")
+                ? ExtractUnrecognizedToken(message)
+                : message;
+            throw new WarningException($"Could not parse command line parameter '{token}'.");
+        }
+
+        if (parseResult.UnmatchedTokens.Count > 0)
+        {
+            throw new WarningException($"Could not parse command line parameter '{parseResult.UnmatchedTokens[0]}'.");
+        }
+
+        var positionalCheck = parseResult.GetValue(options.Path);
+        if (positionalCheck?.StartsWith('-') == true)
+        {
+            throw new WarningException($"Could not parse command line parameter '{positionalCheck}'.");
+        }
+    }
+
+    private static string ExtractUnrecognizedToken(string message)
+    {
+        // System.CommandLine error format: "Unrecognized command or argument 'xxx'."
+        var start = message.IndexOf('\'');
+        var end = message.LastIndexOf('\'');
+        return start >= 0 && end > start ? message[(start + 1)..end] : message;
+    }
+
+    private void MapParsedValues(Arguments arguments, ParseResult parseResult, CommandOptions options)
+    {
+        arguments.LogFilePath = parseResult.GetValue(options.LogFile) ?? arguments.LogFilePath;
+        arguments.Diag = parseResult.GetValue(options.Diagnose);
+        arguments.ShowConfiguration = parseResult.GetValue(options.ShowConfig);
+        arguments.NoFetch = parseResult.GetValue(options.NoFetch);
+        arguments.NoCache = parseResult.GetValue(options.NoCache);
+        arguments.NoNormalize = parseResult.GetValue(options.NoNormalize);
+        arguments.AllowShallow = parseResult.GetValue(options.AllowShallow);
+        arguments.UpdateWixVersionFile = parseResult.GetValue(options.UpdateWixVersionFile);
+
+        MapOutputOptions(arguments, parseResult, options);
+        MapConfigurationOptions(arguments, parseResult, options);
+        MapTargetPathAndVerbosity(arguments, parseResult, options);
+
+        MapUpdateAssemblyInfoOption(arguments, parseResult, options);
+        MapUpdateProjectFilesOption(arguments, parseResult, options);
+        MapEnsureAssemblyInfoOption(arguments, parseResult, options);
+
+        if (arguments.UpdateAssemblyInfoFileName.Count > 1 && arguments.EnsureAssemblyInfo)
+        {
+            throw new WarningException("Can't specify multiple assembly info files when using --ensure-assembly-info, either use a single assembly info file or do not specify --ensure-assembly-info and create assembly info files manually");
+        }
+
+        MapRemoteOptions(arguments, parseResult, options);
+        ApplyDefaults(arguments, parseResult, options);
+    }
+
+    private static Arguments MapMigrationValues(ParseResult parseResult, CommandOptions options)
+    {
+        var outputFile = parseResult.GetValue(options.MigrationOutputFile);
+        var inPlace = parseResult.GetValue(options.InPlace);
+        var force = parseResult.GetValue(options.Force);
+        if (outputFile is not null && inPlace)
+        {
+            throw new WarningException("Cannot use --output together with --in-place.");
+        }
+
+        if (force && outputFile is null)
+        {
+            throw new WarningException("--force can only be used together with --output.");
+        }
+
+        return new Arguments
+        {
+            IsConfigurationMigration = true,
+            MigrationInputFile = parseResult.GetValue(options.MigrationInputFile) ?? parseResult.GetValue(options.Config),
+            MigrationOutputFile = outputFile,
+            MigrationInPlace = inPlace,
+            MigrationForce = force,
+            LogFilePath = parseResult.GetValue(options.LogFile),
+            TargetPath = parseResult.GetValue(options.TargetPath)
+                         ?? parseResult.GetValue(options.Path)
+                         ?? SysEnv.CurrentDirectory
+        };
+    }
+
+    private Arguments MapQueryValues(ParseResult parseResult, CommandOptions options, RootCommand rootCommand)
+    {
+        if (ConfigurationVersionSelector.Resolve() != ConfigurationVersion.V7)
+        {
+            throw new WarningException("Configuration property queries require v7 configuration. Set GITVERSION_CONFIGURATION_VERSION=v7.");
+        }
+
+        var unsupportedOption = rootCommand.Options.Except(options.Get.Options)
+            .FirstOrDefault(option => parseResult.GetResult(option) is { Implicit: false });
+        if (unsupportedOption is not null)
+        {
+            throw new WarningException($"Option '{unsupportedOption.Name}' cannot be used with 'config get'.");
+        }
+
+        var arguments = new Arguments
+        {
+            ConfigurationPropertyPath = parseResult.GetValue(options.PropertyPath),
+            ConfigurationFile = parseResult.GetValue(options.Config),
+            TargetPath = parseResult.GetValue(options.TargetPath) ?? parseResult.GetValue(options.Path) ?? SysEnv.CurrentDirectory,
+            LogFilePath = parseResult.GetValue(options.LogFile)
+        };
+        if (!this.fileSystem.Directory.Exists(arguments.TargetPath))
+        {
+            throw new WarningException($"The working directory '{arguments.TargetPath}' does not exist.");
+        }
+
+        if (parseResult.GetValue(options.VerbosityOption) is { } verbosity)
+        {
+            this.loggingLevelSwitch.MinimumLevel = VerbosityMaps[ParseVerbosity(verbosity)];
+        }
+
+        ParseOverrideConfig(arguments, parseResult.GetValue(options.OverrideConfig));
+        ValidateConfigurationFile(arguments);
+        return arguments;
+    }
+
+    private static void MapOutputOptions(Arguments arguments, ParseResult parseResult, CommandOptions options)
+    {
+        if (parseResult.GetValue(options.Output) is { } outputs)
+        {
+            foreach (var output in outputs)
+            {
+                arguments.Output.Add(output);
+            }
+        }
+
+        if (parseResult.GetValue(options.OutputFile) is { } outputFile)
+        {
+            arguments.OutputFile = outputFile;
+        }
+    }
+
+    private static void MapConfigurationOptions(Arguments arguments, ParseResult parseResult, CommandOptions options)
+    {
+        if (parseResult.GetValue(options.ShowVariable) is { } showVariable)
+        {
+            ParseShowVariable(arguments, showVariable);
+        }
+
+        if (parseResult.GetValue(options.Format) is { } format)
+        {
+            ParseFormat(arguments, format);
+        }
+
+        if (parseResult.GetValue(options.Config) is { } config)
+        {
+            arguments.ConfigurationFile = config;
+        }
+
+        if (parseResult.GetValue(options.OverrideConfig) is { Length: > 0 } overrideConfigs)
+        {
+            ParseOverrideConfig(arguments, overrideConfigs);
+        }
+    }
+
+    private void MapTargetPathAndVerbosity(Arguments arguments, ParseResult parseResult, CommandOptions options)
+    {
+        if (parseResult.GetValue(options.TargetPath) is { } targetPath)
+        {
+            arguments.TargetPath = targetPath;
+            if (string.IsNullOrWhiteSpace(targetPath) || !this.fileSystem.Directory.Exists(targetPath))
+            {
+                this.console.WriteLine($"The working directory '{targetPath}' does not exist.");
+            }
+        }
+
+        if (parseResult.GetValue(options.VerbosityOption) is { } verbosity)
+        {
+            this.loggingLevelSwitch.MinimumLevel = VerbosityMaps[ParseVerbosity(verbosity)];
+        }
+    }
+
+    private static void MapUpdateAssemblyInfoOption(Arguments arguments, ParseResult parseResult, CommandOptions options)
+    {
+        if (parseResult.GetResult(options.UpdateAssemblyInfo) is not { Implicit: false })
+        {
+            return;
+        }
+
+        var values = parseResult.GetValue(options.UpdateAssemblyInfo);
+        if (values is [var single] && (single.Equals("false", StringComparison.OrdinalIgnoreCase) || single.Equals("0", StringComparison.Ordinal)))
+        {
+            arguments.UpdateAssemblyInfo = false;
+        }
+        else
+        {
+            arguments.UpdateAssemblyInfo = true;
+            if (values != null)
+            {
+                foreach (var file in values.Where(f => !f.IsTrue()))
+                {
+                    arguments.UpdateAssemblyInfoFileName.Add(file);
+                }
+            }
+        }
+
+        if (arguments.UpdateProjectFiles)
+        {
+            throw new WarningException("Cannot specify both --update-project-files and --update-assembly-info in the same run. Please rerun GitVersion with only one parameter");
+        }
+    }
+
+    private static void MapUpdateProjectFilesOption(Arguments arguments, ParseResult parseResult, CommandOptions options)
+    {
+        if (parseResult.GetResult(options.UpdateProjectFiles) is not { Implicit: false })
+        {
+            return;
+        }
+
+        arguments.UpdateProjectFiles = true;
+        if (parseResult.GetValue(options.UpdateProjectFiles) is { } projectFiles)
+        {
+            foreach (var file in projectFiles.Where(f => !f.IsTrue()))
+            {
+                arguments.UpdateAssemblyInfoFileName.Add(file);
+            }
+        }
+
+        if (arguments.UpdateAssemblyInfo)
+        {
+            throw new WarningException("Cannot specify both --update-assembly-info and --update-project-files in the same run. Please rerun GitVersion with only one parameter");
+        }
+
+        if (arguments.EnsureAssemblyInfo)
+        {
+            throw new WarningException("Cannot specify --ensure-assembly-info with --update-project-files: please ensure your project file exists before attempting to update it");
+        }
+    }
+
+    private static void MapEnsureAssemblyInfoOption(Arguments arguments, ParseResult parseResult, CommandOptions options)
+    {
+        if (!parseResult.GetValue(options.EnsureAssemblyInfo))
+        {
+            return;
+        }
+
+        arguments.EnsureAssemblyInfo = true;
+
+        if (arguments.UpdateProjectFiles)
+        {
+            throw new WarningException("Cannot specify --ensure-assembly-info with --update-project-files: please ensure your project file exists before attempting to update it");
+        }
+    }
+
+    private static void MapRemoteOptions(Arguments arguments, ParseResult parseResult, CommandOptions options)
+    {
+        if (parseResult.GetValue(options.Url) is { } url)
+        {
+            arguments.TargetUrl = url;
+        }
+
+        if (parseResult.GetValue(options.Branch) is { } branch)
+        {
+            arguments.TargetBranch = branch;
+        }
+
+        if (parseResult.GetValue(options.Username) is { } username)
+        {
+            arguments.Authentication.Username = username;
+        }
+
+        if (parseResult.GetValue(options.Password) is { } password)
+        {
+            arguments.Authentication.Password = password;
+        }
+
+        if (parseResult.GetValue(options.Commit) is { } commit)
+        {
+            arguments.CommitId = commit;
+        }
+
+        if (parseResult.GetValue(options.DynamicRepoLocation) is { } dynRepo)
+        {
+            arguments.ClonePath = dynRepo;
+        }
+    }
+
+    private void ApplyDefaults(Arguments arguments, ParseResult parseResult, CommandOptions options)
+    {
+        if (arguments.Output.Count == 0)
+        {
+            arguments.Output.Add(OutputType.Json);
+        }
+
+        if (arguments.Output.Contains(OutputType.File) && arguments.OutputFile == null)
+        {
+            arguments.OutputFile = DefaultOutputFileName;
+        }
+
+        arguments.TargetPath ??= parseResult.GetValue(options.Path) ?? SysEnv.CurrentDirectory;
+        arguments.TargetPath = arguments.TargetPath.TrimEnd('/', '\\');
+
+        if (!arguments.EnsureAssemblyInfo)
+        {
+            arguments.UpdateAssemblyInfoFileName = ResolveFiles(arguments.TargetPath, arguments.UpdateAssemblyInfoFileName).ToHashSet();
+        }
+    }
+
+    private static (RootCommand Root, CommandOptions Options, IReadOnlyDictionary<Symbol, CliSchemaValues> Values) BuildCommand()
+    {
+        var path = new Argument<string?>("path")
+        {
+            Description = "The directory containing .git. If not defined current directory is used. (Must be first argument)",
+            Arity = ArgumentArity.ZeroOrOne
+        };
+        var diagnose = new Option<bool>("--diagnose", "-d")
+        {
+            Description = """
+                          Runs GitVersion with additional diagnostic information.
+                          Also needs the '--log-file' argument to specify a logfile or stdout (requires git.exe to be installed)
+                          """
+        };
+        var logFile = new Option<string?>("--log-file", "-l")
+        {
+            Description = "Path to logfile; specify 'console' to emit to stderr"
+        };
+        var output = new Option<OutputType[]>("--output", "-o")
+        {
+            Description = "Determines the output to the console. Can be either 'json', 'file', 'buildserver' or 'dotenv', will default to 'json'",
+            AllowMultipleArgumentsPerToken = true,
+            Arity = ArgumentArity.ZeroOrMore
+        };
+        var outputFile = new Option<string?>("--output-file")
+        {
+            Description = "Path to output file. It is used in combination with --output 'file'"
+        };
+        var showVariable = new Option<string?>("--show-variable", "-v")
+        {
+            Description = """
+                          Used in conjunction with --output json, will output just a particular variable.
+                          E.g. --output json --show-variable SemVer - will output `1.2.3+beta.4`
+                          """
+        };
+        var format = new Option<string?>("--format", "-f")
+        {
+            Description = """
+                          Used in conjunction with --output json, will output a format containing version variables.
+                          Supports C# format strings - see [Format Strings](/docs/reference/custom-formatting) for details.
+                          E.g. --output json --format {SemVer} - will output `1.2.3+beta.4`
+                               --output json --format {Major}.{Minor} - will output `1.2`
+                          """
+        };
+        var config = new Option<string?>("--config", "-c")
+        {
+            Description = "Path to config file (defaults to GitVersion.yml, GitVersion.yaml, .GitVersion.yml or .GitVersion.yaml)"
+        };
+        var showConfig = new Option<bool>("--show-config")
+        {
+            Description = "Outputs the effective GitVersion config in yaml format (defaults + custom from GitVersion.yml + runtime overrides with v7 configuration)"
+        };
+        var overrideConfig = new Option<string[]>("--override-config")
+        {
+            Description = "Overrides GitVersion config values inline (key=value pairs e.g. --override-config workflow=GitHubFlow/v1)",
+            AllowMultipleArgumentsPerToken = false,
+            Arity = ArgumentArity.ZeroOrMore
+        };
+        var targetPath = new Option<string?>("--target-path")
+        {
+            Description = "Same as 'path', but not positional"
+        };
+        var noFetch = new Option<bool>("--no-fetch")
+        {
+            Description = "Disables 'git fetch' during version calculation. Might cause GitVersion to not calculate your version as expected"
+        };
+        var noCache = new Option<bool>("--no-cache")
+        {
+            Description = "Bypasses the cache, result will not be written to the cache"
+        };
+        var noNormalize = new Option<bool>("--no-normalize")
+        {
+            Description = "Disables normalize step on a build server"
+        };
+        var allowShallow = new Option<bool>("--allow-shallow")
+        {
+            Description = """
+                          Allows GitVersion to run on a shallow clone.
+                          This is not recommended, but can be used if you are sure that the shallow clone contains all the information needed to calculate the version.
+                          """
+        };
+        var verbosity = new Option<string?>("--verbosity")
+        {
+            Description = "Specifies the amount of information to be displayed (Quiet, Minimal, Normal, Verbose, Diagnostic). Default is Normal"
+        };
+        var updateAssemblyInfo = new Option<string[]?>("--update-assembly-info")
+        {
+            Description = "Will recursively search for all 'AssemblyInfo.cs' files in the git repo and update them",
+            AllowMultipleArgumentsPerToken = true,
+            Arity = ArgumentArity.ZeroOrMore
+        };
+        var updateProjectFiles = new Option<string[]?>("--update-project-files")
+        {
+            Description = """
+                          Will recursively search for all project files (.csproj/.vbproj/.fsproj/.sqlproj) in the git repo and update them (only compatible with Sdk projects)
+                          """,
+            AllowMultipleArgumentsPerToken = true,
+            Arity = ArgumentArity.ZeroOrMore
+        };
+        var ensureAssemblyInfo = new Option<bool>("--ensure-assembly-info")
+        {
+            Description = """
+                          If the assembly info file specified with --update-assembly-info is not found, it will be created with AssemblyFileVersion, AssemblyVersion and AssemblyInformationalVersion.
+                          Supports C#, F#, VB
+                          """
+        };
+        var updateWixVersionFile = new Option<bool>("--update-wix-version-file")
+        {
+            Description = "All the GitVersion variables are written to 'GitVersion_WixVersion.wxi'"
+        };
+        var url = new Option<string?>("--url")
+        {
+            Description = "Url to remote git repository"
+        };
+        var branch = new Option<string?>("--branch", "-b")
+        {
+            Description = "Target branch to version (local or with --url). Takes precedence over GIT_BRANCH/Git_Branch, which only supply branch context at HEAD"
+        };
+        var username = new Option<string?>("--username", "-u")
+        {
+            Description = "Username in case authentication is required"
+        };
+        var password = new Option<string?>("--password", "-p")
+        {
+            Description = "Password in case authentication is required"
+        };
+        var commit = new Option<string?>("--commit")
+        {
+            Description = "The commit id to check. If not specified, the latest available commit on the specified branch will be used"
+        };
+        var dynamicRepoLocation = new Option<string?>("--dynamic-repo-location")
+        {
+            Description = "By default dynamic repositories will be cloned to %tmp%. Use this option to override"
+        };
+        var configCommand = new Command("config", "Manages GitVersion configuration.");
+        configCommand.SetAction(_ => { });
+        var migrate = new Command("migrate", "Migrates a v6 configuration document to the v7 structure.");
+        var migrationInputFile = new Option<string?>("--config", "-c") { Description = "Path to the configuration file to migrate." };
+        var migrationOutputFile = new Option<string?>("--output") { Description = "Path to write the migrated configuration document." };
+        var inPlace = new Option<bool>("--in-place") { Description = "Replace the input configuration file." };
+        var force = new Option<bool>("--force") { Description = "Allow --output to replace an existing file." };
+        migrate.Options.Add(migrationInputFile);
+        migrate.Options.Add(migrationOutputFile);
+        migrate.Options.Add(inPlace);
+        migrate.Options.Add(force);
+        configCommand.Subcommands.Add(migrate);
+
+        var get = new Command("get", "Queries a scalar property of the effective v7 configuration as JSON.");
+        var propertyPath = new Argument<string>("property-path")
+        {
+            Description = "Dot-separated public v7 property path, e.g. calculation.tag-prefix. Maps and collections are not supported.",
+            Arity = ArgumentArity.ExactlyOne
+        };
+        get.Arguments.Add(propertyPath);
+        get.Options.Add(config);
+        get.Options.Add(overrideConfig);
+        get.Options.Add(targetPath);
+        get.Options.Add(logFile);
+        get.Options.Add(verbosity);
+        configCommand.Subcommands.Add(get);
+
+        var validate = new Command("validate", "Validates a configuration file without calculating a version or accessing a Git backend.");
+        var validationFormat = new Option<string?>("--format") { Description = "Emit one versioned JSON validation result (json). Default: diagnostics on stderr and empty stdout." };
+        validate.Options.Add(config);
+        validate.Options.Add(overrideConfig);
+        validate.Options.Add(targetPath);
+        validate.Options.Add(validationFormat);
+        configCommand.Subcommands.Add(validate);
+
+        var cliSchema = new Option<bool>("--cli-schema")
+        {
+            Description = "Writes the complete OpenCLI 0.1 command schema as JSON and exits.",
+            Arity = ArgumentArity.Zero,
+            Recursive = true,
+            Action = new CliSchemaAction()
+        };
+
+        var rootCommand = new RootCommand("Use convention to derive a SemVer product version from a GitFlow or GitHub based repository.")
+        {
+            path,
+            diagnose,
+            logFile,
+            output,
+            outputFile,
+            showVariable,
+            format,
+            config,
+            showConfig,
+            overrideConfig,
+            targetPath,
+            noFetch,
+            noCache,
+            noNormalize,
+            allowShallow,
+            verbosity,
+            updateAssemblyInfo,
+            updateProjectFiles,
+            ensureAssemblyInfo,
+            updateWixVersionFile,
+            url,
+            branch,
+            username,
+            password,
+            commit,
+            dynamicRepoLocation,
+            cliSchema
+        };
+        rootCommand.Subcommands.Add(configCommand);
+
+        // System.CommandLine requires an action on the root command so normal version calculation
+        // remains a valid invocation while subcommands provide their own parsing paths.
+        rootCommand.SetAction(_ => { });
+
+        // Configure the built-in help system to wrap at 260 characters to avoid too small help messages
+        var helpOption = rootCommand.Options.SingleOfType<HelpOption>();
+        if (helpOption.Action is HelpAction helpAction)
+        {
+            helpAction.MaxWidth = 260;
+        }
+
+        return (rootCommand, new CommandOptions(
+            Path: path, Diagnose: diagnose, LogFile: logFile,
+            Output: output, OutputFile: outputFile, ShowVariable: showVariable, Format: format,
+            Config: config, ShowConfig: showConfig, OverrideConfig: overrideConfig, TargetPath: targetPath,
+            NoFetch: noFetch, NoCache: noCache, NoNormalize: noNormalize, AllowShallow: allowShallow,
+            VerbosityOption: verbosity, UpdateAssemblyInfo: updateAssemblyInfo, UpdateProjectFiles: updateProjectFiles,
+            EnsureAssemblyInfo: ensureAssemblyInfo, UpdateWixVersionFile: updateWixVersionFile,
+            Url: url, Branch: branch, Username: username, Password: password,
+            Commit: commit, DynamicRepoLocation: dynamicRepoLocation,
+            ConfigCommand: configCommand, Migrate: migrate,
+            MigrationInputFile: migrationInputFile, MigrationOutputFile: migrationOutputFile,
+            InPlace: inPlace, Force: force, Get: get, PropertyPath: propertyPath, CliSchema: cliSchema,
+            Validate: validate, ValidationFormat: validationFormat
+        ), new Dictionary<Symbol, CliSchemaValues>
+        {
+            [verbosity] = new(Enum.GetNames<Verbosity>(), true, true),
+            [showVariable] = new([.. availableVariables], true),
+            [validationFormat] = new(["json"])
+        });
+    }
+
+    private void AddAuthentication(Arguments arguments)
+    {
+        var username = this.environment.GetEnvironmentVariable("GITVERSION_REMOTE_USERNAME");
+        var password = this.environment.GetEnvironmentVariable("GITVERSION_REMOTE_PASSWORD");
+        if (!username.IsNullOrWhiteSpace())
+        {
+            arguments.Authentication.Username = username;
+        }
+
+        if (!password.IsNullOrWhiteSpace())
+        {
+            arguments.Authentication.Password = password;
+        }
+    }
+
+    private IEnumerable<string> ResolveFiles(string workingDirectory, ISet<string>? assemblyInfoFiles) =>
+        assemblyInfoFiles?.SelectMany(file => this.globbingResolver.Resolve(workingDirectory, file))
+        ?? [];
+
+    private void ValidateConfigurationFile(Arguments arguments)
+    {
+        if (arguments.ConfigurationFile.IsNullOrWhiteSpace())
+        {
+            return;
+        }
+
+        if (FileSystemHelper.Path.IsPathRooted(arguments.ConfigurationFile))
+        {
+            if (!this.fileSystem.File.Exists(arguments.ConfigurationFile))
+            {
+                throw new WarningException($"Could not find config file at '{arguments.ConfigurationFile}'");
+            }
+
+            arguments.ConfigurationFile = FileSystemHelper.Path.GetFullPath(arguments.ConfigurationFile);
+        }
+        else
+        {
+            var configFilePath = FileSystemHelper.Path.GetFullPath(
+                FileSystemHelper.Path.Combine(arguments.TargetPath, arguments.ConfigurationFile));
+            if (!this.fileSystem.File.Exists(configFilePath))
+            {
+                throw new WarningException($"Could not find config file at '{configFilePath}'");
+            }
+
+            arguments.ConfigurationFile = configFilePath;
+        }
+    }
+
+    private static void ParseShowVariable(Arguments arguments, string value)
+    {
+        var versionVariable = value.IsNullOrWhiteSpace() ? null : availableVariables.SingleOrDefault(av => av.Equals(value.Replace("'", ""), StringComparison.CurrentCultureIgnoreCase));
+
+        if (versionVariable == null)
+        {
+            var available = string.Join(", ", availableVariables.Select(x => $"'{x}'"));
+            throw new WarningException($"--show-variable requires a valid version variable. Available variables are:{FileSystemHelper.Path.NewLine}{available}");
+        }
+
+        arguments.ShowVariable = versionVariable;
+    }
+
+    private static void ParseFormat(Arguments arguments, string value)
+    {
+        if (value.IsNullOrWhiteSpace() || !availableVariables.Any(v => value.Contains(v, StringComparison.CurrentCultureIgnoreCase)))
+        {
+            throw new WarningException("Format requires a valid format string. Available variables are: " +
+                                       string.Join(", ", availableVariables));
+        }
+
+        arguments.Format = value;
+    }
+
+    internal static Verbosity ParseVerbosity(string? value)
+    {
+        if (!Enum.TryParse(value, true, out Verbosity verbosity))
+        {
+            throw new WarningException($"Could not parse Verbosity value '{value}'");
+        }
+
+        return verbosity;
+    }
+
+    private static void ParseOverrideConfig(Arguments arguments, IReadOnlyCollection<string>? values)
+    {
+        if (values == null || values.Count == 0)
+        {
+            return;
+        }
+
+        var parser = new OverrideConfigurationOptionParser();
+        parser.SetValues(values, "--override-config");
+        arguments.OverrideConfiguration = parser.GetOverrideConfiguration();
+    }
+
+    private sealed record CommandOptions(
+        Argument<string?> Path,
+        Option<bool> Diagnose,
+        Option<string?> LogFile,
+        Option<OutputType[]> Output,
+        Option<string?> OutputFile,
+        Option<string?> ShowVariable,
+        Option<string?> Format,
+        Option<string?> Config,
+        Option<bool> ShowConfig,
+        Option<string[]> OverrideConfig,
+        Option<string?> TargetPath,
+        Option<bool> NoFetch,
+        Option<bool> NoCache,
+        Option<bool> NoNormalize,
+        Option<bool> AllowShallow,
+        Option<string?> VerbosityOption,
+        Option<string[]?> UpdateAssemblyInfo,
+        Option<string[]?> UpdateProjectFiles,
+        Option<bool> EnsureAssemblyInfo,
+        Option<bool> UpdateWixVersionFile,
+        Option<string?> Url,
+        Option<string?> Branch,
+        Option<string?> Username,
+        Option<string?> Password,
+        Option<string?> Commit,
+        Option<string?> DynamicRepoLocation,
+        Command ConfigCommand,
+        Command Migrate,
+        Option<string?> MigrationInputFile,
+        Option<string?> MigrationOutputFile,
+        Option<bool> InPlace,
+        Option<bool> Force,
+        Command Get,
+        Argument<string> PropertyPath,
+        Option<bool> CliSchema,
+        Command Validate,
+        Option<string?> ValidationFormat
+    );
+}

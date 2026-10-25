@@ -1,0 +1,327 @@
+using Xunit;
+using DockerBuildXBuildSettings = Common.Addins.Cake.Docker.DockerBuildXBuildSettings;
+using DockerBuildXImageToolsCreateSettings = Common.Addins.Cake.Docker.DockerBuildXImageToolsCreateSettings;
+
+namespace Common.Utilities;
+
+public enum Architecture
+{
+    Arm64,
+    Amd64
+}
+
+#pragma warning disable S1144
+public static class DockerContextExtensions
+{
+    private static readonly string[] Annotations =
+    [
+        "org.opencontainers.image.authors=GitTools Maintainers",
+        "org.opencontainers.image.vendor=GitTools",
+        "org.opencontainers.image.licenses=MIT",
+        "org.opencontainers.image.source=https://github.com/GitTools/GitVersion.git",
+        "org.opencontainers.image.documentation=https://gitversion.net/docs/usage/docker",
+        $"org.opencontainers.image.created={DateTime.UtcNow:O}"
+    ];
+
+    extension(BuildContextBase context)
+    {
+        public bool SkipImageTesting(DockerImage dockerImage)
+        {
+            var (distro, targetFramework, architecture, _, _) = dockerImage;
+
+            switch (architecture)
+            {
+                case Architecture.Amd64:
+                case Architecture.Arm64 when context.IsRunningOnArm64():
+                    return false;
+                default:
+                    context.Information($"Skipping Target: {targetFramework}, Distro: {distro}, Arch: {architecture}");
+                    return true;
+            }
+        }
+
+        public void DockerBuildImage(DockerImage dockerImage)
+        {
+            if (context.Version == null)
+            {
+                return;
+            }
+
+            var (distro, targetFramework, arch, registry, _) = dockerImage;
+
+            context.Information($"Building image: {dockerImage}");
+
+            var workDir = Paths.Build.Combine("docker");
+            var tags = context.GetDockerTags(dockerImage, arch);
+
+            var suffix = arch.ToSuffix();
+            var imageSuffix = $"({distro}-{context.Version.NugetVersion}-{targetFramework}-{suffix})";
+            var baseNameSuffix = $"{registry}/{Constants.DockerBaseImageName}:{distro}-runtime-{targetFramework}-{suffix}";
+            var description = $"org.opencontainers.image.description=GitVersion images {imageSuffix}";
+            var baseName = $"org.opencontainers.image.base.name={baseNameSuffix}";
+            var version = $"org.opencontainers.image.version={context.Version.NugetVersion}";
+            var revision = $"org.opencontainers.image.revision={context.Version.GitVersion.Sha}";
+            var source = $"org.opencontainers.image.source=https://github.com/GitTools/GitVersion/blob/{context.Version.GitVersion.Sha}/build/docker/Dockerfile";
+
+            var buildSettings = new DockerBuildXBuildSettings
+            {
+                Rm = true,
+                Pull = true,
+                // NoCache = true,
+                Tag = [.. tags],
+                Platform = [$"linux/{suffix}"],
+                Output = ["type=docker,oci-mediatypes=true"],
+                File = workDir.CombineWithFilePath("Dockerfile").FullPath,
+                BuildArg =
+                [
+                    "nugetFolder=/nuget",
+                    $"REGISTRY={registry}",
+                    $"DOTNET_VERSION={targetFramework}",
+                    $"DISTRO={distro}",
+                    $"VERSION={context.Version.NugetVersion}"
+                ],
+                Label =
+                [
+                    "maintainers=GitTools Maintainers",
+                    .. Annotations,
+                    baseName,
+                    version,
+                    source,
+                    revision,
+                    description
+                ],
+                Annotation =
+                [
+                    .. Annotations,
+                    baseName,
+                    version,
+                    source,
+                    revision,
+                    description
+                ]
+            };
+
+            context.DockerBuildXBuild(buildSettings, workDir.ToString());
+        }
+
+        public void DockerBuildXBuild(DockerBuildXBuildSettings settings,
+                                      DirectoryPath target)
+        {
+            ArgumentNullException.ThrowIfNull(context);
+            var runner = context.CreateRunner<DockerBuildXBuildSettings>();
+            runner.Run("buildx build", settings, [target.ToString().EscapeProcessArgument()]);
+        }
+
+        public void DockerManifest(DockerImage dockerImage)
+        {
+            ArgumentNullException.ThrowIfNull(context.Version);
+            var manifestTags = context.GetDockerTags(dockerImage);
+            foreach (var tag in manifestTags)
+            {
+                var amd64Tag = $"{tag}-{Architecture.Amd64.ToSuffix()}";
+                var arm64Tag = $"{tag}-{Architecture.Arm64.ToSuffix()}";
+
+                var settings = GetManifestSettings(dockerImage, context.Version, tag);
+                context.DockerBuildXImageToolsCreate(settings, [amd64Tag, arm64Tag]);
+            }
+        }
+
+        private void DockerBuildXImageToolsCreate(DockerBuildXImageToolsCreateSettings settings,
+                                                  IEnumerable<string>? target = null)
+        {
+            ArgumentNullException.ThrowIfNull(context);
+            var runner = context.CreateRunner<DockerBuildXImageToolsCreateSettings>();
+            runner.Run("buildx imagetools create", settings, target?.ToArray() ?? []);
+        }
+
+        private GenericDockerRunner<TSettings> CreateRunner<TSettings>()
+            where TSettings : AutoToolSettings, new() =>
+            new(context.FileSystem, context.Environment, context.ProcessRunner, context.Tools);
+
+        public void DockerPushImage(DockerImage dockerImage)
+        {
+            var tags = context.GetDockerTags(dockerImage, dockerImage.Architecture);
+            foreach (var tag in tags)
+            {
+                context.DockerPush(tag);
+            }
+        }
+
+        public void DockerPullImage(DockerImage dockerImage)
+        {
+            var tag = $"{dockerImage.DockerImageName()}:{dockerImage.Distro}-sdk-{dockerImage.TargetFramework}";
+            var platform = $"linux/{dockerImage.Architecture.ToString().ToLower()}";
+            context.DockerPull(new() { Platform = platform }, tag);
+        }
+
+        public void DockerTestImage(DockerImage dockerImage)
+        {
+            var tags = context.GetDockerTags(dockerImage, dockerImage.Architecture);
+            foreach (var tag in tags)
+            {
+                var identity = context.DockerRun(new DockerContainerRunSettings
+                {
+                    Rm = true,
+                    Entrypoint = "id",
+                    Platform = $"linux/{dockerImage.Architecture.ToString().ToLower()}"
+                }, tag, "-u");
+                Assert.Equal("10001", string.Join("", identity).Trim());
+                context.DockerTestRun(tag, dockerImage.Architecture, false, "/repo", "--show-variable", "FullSemver", "--no-cache");
+            }
+        }
+
+        public void DockerTestArtifact(DockerImage dockerImage, string cmd)
+        {
+            var tag = $"{dockerImage.DockerImageName()}:{dockerImage.Distro}-sdk-{dockerImage.TargetFramework}";
+            context.DockerTestRun(tag, dockerImage.Architecture, true, "sh", cmd);
+        }
+
+        private void DockerTestRun(string image, Architecture arch, bool useSdkHome, string command,
+                                   params string[] args)
+        {
+            ArgumentNullException.ThrowIfNull(context.Version?.GitVersion.FullSemVer);
+            var settings = context.GetDockerRunSettings(arch, useSdkHome);
+            context.Information($"Testing image: {image}");
+            var output = context.DockerRun(settings, image, command, args);
+            context.Information("Output : " + output);
+
+            Assert.Contains(context.Version.GitVersion.FullSemVer, output);
+        }
+
+        private IEnumerable<string> GetDockerTags(DockerImage dockerImage,
+                                                  Architecture? arch = null)
+        {
+            var name = dockerImage.DockerImageName();
+            var distro = dockerImage.Distro;
+            var targetFramework = dockerImage.TargetFramework;
+
+            if (context.Version == null)
+            {
+                return [];
+            }
+
+            var tags = new List<string>
+            {
+                $"{name}:{context.Version.Version}-{distro}-{targetFramework}",
+                $"{name}:{context.Version.SemVersion}-{distro}-{targetFramework}"
+            };
+
+            if (distro == Constants.DockerDistroLatest && targetFramework == Constants.DotnetLtsLatest)
+            {
+                tags.Add($"{name}:{context.Version.SemVersion}");
+
+                if (context.IsTaggedRelease)
+                {
+                    tags.AddRange(
+                    [
+                        $"{name}:{context.Version.Version}",
+                        $"{name}:latest",
+                        $"{name}:latest-{targetFramework}",
+                        $"{name}:latest-{distro}",
+                        $"{name}:latest-{distro}-{targetFramework}"
+                    ]);
+                }
+            }
+
+            if (!arch.HasValue)
+            {
+                return tags.Distinct();
+            }
+
+            var suffix = arch.Value.ToSuffix();
+            return tags.Select(x => $"{x}-{suffix}").Distinct();
+        }
+
+        private DockerContainerRunSettings GetDockerRunSettings(Architecture arch, bool useSdkHome)
+        {
+            var currentDir = context.MakeAbsolute(context.Directory("."));
+            var root = string.Empty;
+            var statArguments = context.IsOnMacOS ? "-f %u:%g ." : "-c %u:%g .";
+            var owner = context.ExecuteCommand("stat", statArguments, currentDir).Single().Trim().Split(':');
+            if (owner.Length != 2 || !uint.TryParse(owner[0], out var uid) || !uint.TryParse(owner[1], out var gid))
+            {
+                throw new CakeException("Cannot determine the checkout owner's UID/GID for Docker tests.");
+            }
+            if (uid == 0)
+            {
+                throw new CakeException("Docker tests must run as a non-root checkout owner to validate bind-mount permissions.");
+            }
+            var settings = new DockerContainerRunSettings
+            {
+                Rm = true,
+                User = $"{uid}:{gid}",
+                Workdir = "/repo",
+                Volume =
+                [
+                    $"{currentDir}:{root}/repo",
+                    $"{currentDir}/tests/scripts:{root}/scripts:ro",
+                    $"{currentDir}/artifacts/packages/nuget:{root}/nuget:ro",
+                    $"{currentDir}/artifacts/packages/native:{root}/native:ro"
+                ],
+                Platform = $"linux/{arch.ToString().ToLower()}"
+            };
+
+            if (context.IsAzurePipelineBuild)
+            {
+                settings.Env =
+                [
+                    "TF_BUILD=true",
+                    $"BUILD_SOURCEBRANCH={context.EnvironmentVariable("BUILD_SOURCEBRANCH")}"
+                ];
+            }
+
+            if (context.IsGitHubActionsBuild)
+            {
+                settings.Env =
+                [
+                    "GITHUB_ACTIONS=true",
+                    $"GITHUB_REF={context.EnvironmentVariable("GITHUB_REF")}"
+                ];
+            }
+
+            // Forward the selected Git backend into the container so the same image/package is
+            // exercised against both libgit2 and managed (set per-step in CI). Absent = managed default.
+            var gitBackend = context.EnvironmentVariable("GITVERSION_GIT_BACKEND");
+            if (!string.IsNullOrWhiteSpace(gitBackend))
+            {
+                settings.Env = [.. settings.Env ?? [], $"GITVERSION_GIT_BACKEND={gitBackend}"];
+            }
+
+            // SDK artifact tests need writable CLI configuration. Final-image tests
+            // deliberately inherit HOME to exercise the entrypoint's UID fallback.
+            if (useSdkHome)
+            {
+                settings.Env = [.. settings.Env ?? [], "HOME=/tmp", "DOTNET_CLI_HOME=/tmp"];
+            }
+
+            return settings;
+        }
+    }
+
+    extension(DockerImage image)
+    {
+        private string DockerImageName() =>
+            $"{image.Registry}/{(image.UseBaseImage ? Constants.DockerBaseImageName : Constants.DockerImageName)}";
+    }
+
+    private static DockerBuildXImageToolsCreateSettings GetManifestSettings(DockerImage dockerImage, BuildVersion buildVersion, string tag)
+    {
+        var imageSuffix = $"({dockerImage.Distro}-{buildVersion.NugetVersion}-{dockerImage.TargetFramework})";
+        var description = $"org.opencontainers.image.description=GitVersion images {imageSuffix}";
+        var version = $"org.opencontainers.image.version={buildVersion.NugetVersion}";
+        var revision = $"org.opencontainers.image.revision={buildVersion.GitVersion.Sha}";
+        var settings = new DockerBuildXImageToolsCreateSettings
+        {
+            Tag = [tag],
+            Annotation =
+            [
+                .. Annotations.Select(a => "index:" + a).ToArray(),
+                $"index:{description}",
+                $"index:{version}",
+                $"index:{revision}"
+            ]
+        };
+        return settings;
+    }
+}
+#pragma warning restore S1144

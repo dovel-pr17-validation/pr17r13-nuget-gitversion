@@ -1,0 +1,73 @@
+using GitVersion.Agents;
+using GitVersion.Helpers;
+using GitVersion.Testing.Extensions;
+using GitVersion.Tests;
+
+namespace GitVersion.App.Tests;
+
+public class JsonOutputOnBuildServerTest
+{
+    [Test]
+    public void BeingOnBuildServerDoesntOverrideOutputJson()
+    {
+        using var fixture = new RemoteRepositoryFixture();
+        fixture.Repository.MakeATaggedCommit("1.2.3");
+        fixture.Repository.MakeACommit();
+
+        var env = new KeyValuePair<string, string?>(TeamCity.EnvironmentVariableName, "8.0.0");
+
+        var result = GitVersionHelper.ExecuteIn(fixture.LocalRepositoryFixture.RepositoryPath, arguments: " --output json", environments: env);
+
+        result.ExitCode.ShouldBe(0);
+        result.StandardOutput.ShouldNotBeNull();
+        using var json = JsonDocument.Parse(result.StandardOutput);
+        json.RootElement.GetProperty("FullSemVer").GetString().ShouldBe("0.0.1-5");
+    }
+
+    [Test]
+    public void BeingOnBuildServerWithOutputJsonDoesNotFail()
+    {
+        using var fixture = new RemoteRepositoryFixture();
+        fixture.Repository.MakeATaggedCommit("1.2.3");
+        fixture.Repository.MakeACommit();
+
+        var env = new KeyValuePair<string, string?>(TeamCity.EnvironmentVariableName, "8.0.0");
+
+        var result = GitVersionHelper.ExecuteIn(fixture.LocalRepositoryFixture.RepositoryPath, arguments: " --output json --output buildserver", environments: env);
+
+        result.ExitCode.ShouldBe(0);
+        const string expectedVersion = "0.0.1-5";
+        result.Output.ShouldNotBeNull();
+        result.Output.ShouldContain($"##teamcity[buildNumber '{expectedVersion}']");
+        result.OutputVariables.ShouldNotBeNull();
+        result.OutputVariables.FullSemVer.ShouldBeEquivalentTo(expectedVersion);
+    }
+
+    [TestCase("", "GitVersion.json")]
+    [TestCase("version.json", "version.json")]
+    public void BeingOnBuildServerWithOutputJsonAndOutputFileDoesNotFail(string outputFile, string fileName)
+    {
+        using var fixture = new RemoteRepositoryFixture();
+        fixture.Repository.MakeATaggedCommit("1.2.3");
+        fixture.Repository.MakeACommit();
+
+        var env = new KeyValuePair<string, string?>(TeamCity.EnvironmentVariableName, "8.0.0");
+
+        var outputFileArg = string.IsNullOrEmpty(outputFile) ? "" : $" --output-file {outputFile}";
+        var result = GitVersionHelper.ExecuteIn(fixture.LocalRepositoryFixture.RepositoryPath, arguments: $" --output json --output buildserver --output file{outputFileArg}", environments: env);
+
+        result.ExitCode.ShouldBe(0);
+        const string expectedVersion = "0.0.1-5";
+        result.Output.ShouldNotBeNull();
+        result.Output.ShouldContain($"##teamcity[buildNumber '{expectedVersion}']");
+        result.OutputVariables.ShouldNotBeNull();
+        result.OutputVariables.FullSemVer.ShouldBeEquivalentTo(expectedVersion);
+
+        var filePath = FileSystemHelper.Path.Combine(fixture.LocalRepositoryFixture.RepositoryPath, fileName);
+        var json = FileSystemHelper.File.ReadAllText(filePath);
+
+        var outputVariables = json.ToGitVersionVariables();
+        outputVariables.ShouldNotBeNull();
+        outputVariables.FullSemVer.ShouldBeEquivalentTo(expectedVersion);
+    }
+}

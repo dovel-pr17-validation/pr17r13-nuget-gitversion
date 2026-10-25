@@ -1,0 +1,20 @@
+using GitVersion.Extensions;
+using Microsoft.Extensions.Logging;
+
+namespace GitVersion.Commands;
+
+public record ConfigSettings : GitVersionSettings; // NOSONAR: Distinct command settings type inheriting shared options.
+
+[Command("config", "Manages the GitVersion configuration file.")]
+public class ConfigCommand(ILogger<ConfigCommand> logger, IService service) : ICommand<ConfigSettings>
+{
+    private readonly ILogger logger = logger.NotNull();
+    private readonly IService service = service.NotNull();
+
+    public Task<int> InvokeAsync(ConfigSettings settings, CancellationToken cancellationToken = default)
+    {
+        var value = this.service.Call();
+        this.logger.LogInformation("Command : 'config', LogFile : '{LogFile}', WorkDir : '{WorkDir}' ", settings.LogFile, settings.WorkDir);
+        return Task.FromResult(value);
+    }
+}

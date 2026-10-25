@@ -1,0 +1,132 @@
+<Project>
+    <PropertyGroup>
+        <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+
+        <EndYear>$([System.DateTime]::Today.Year)</EndYear>
+        <Authors>GitTools and Contributors</Authors>
+        <Copyright>Copyright GitTools $(EndYear).</Copyright>
+        <Company>$(Authors)</Company>
+
+        <PackageProjectUrl>https://github.com/GitTools/GitVersion</PackageProjectUrl>
+        <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+        <PackageTags>Git;Versioning;GitVersion;GitFlowVersion;GitFlow;GitHubFlow;SemVer</PackageTags>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageIcon>package_icon.png</PackageIcon>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageReleaseNotes>https://github.com/GitTools/GitVersion/releases</PackageReleaseNotes>
+
+        <RepositoryUrl>https://github.com/GitTools/GitVersion</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+
+        <NoWarn>$(NoWarn);NU1701;IDE0005</NoWarn>
+
+        <DebugType>embedded</DebugType>
+        <LangVersion>latest</LangVersion>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+
+        <EnableNETAnalyzers>true</EnableNETAnalyzers>
+        <AnalysisLevel>latest</AnalysisLevel>
+        <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+
+        <IsUnitTestProject>false</IsUnitTestProject>
+        <IsUnitTestProject Condition="$(MSBuildProjectName.EndsWith('.Tests'))">true</IsUnitTestProject>
+
+        <DisableAnalyzers>false</DisableAnalyzers>
+        <DisableApiAnalyzers>false</DisableApiAnalyzers>
+        <DisableApiAnalyzers Condition=" '$(IsUnitTestProject)' == 'true' ">true</DisableApiAnalyzers>
+        <DisableApiAnalyzers Condition="$(MSBuildProjectName.EndsWith('.Schema')) == 'true'">true</DisableApiAnalyzers>
+        <DisableApiAnalyzers Condition="$(MSBuildProjectName.EndsWith('.Testing')) == 'true'">true</DisableApiAnalyzers>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(IsUnitTestProject)' == 'true' ">
+        <OutputType>Exe</OutputType>
+        <IsPackable>false</IsPackable>
+
+        <EnableNUnitRunner>true</EnableNUnitRunner>
+        <EnableMicrosoftTestingPlatformRunner>true</EnableMicrosoftTestingPlatformRunner>
+
+        <DebugType>full</DebugType>
+        <Optimize>false</Optimize>
+        <DebugSymbols>true</DebugSymbols>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
+        <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    </PropertyGroup>
+
+    <ItemGroup Condition=" '$(DisableAnalyzers)' == 'false' ">
+        <PackageReference Include="Roslynator.Analyzers">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+        <PackageReference Include="Roslynator.Formatting.Analyzers">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+    </ItemGroup>
+    <ItemGroup Condition=" '$(DisableApiAnalyzers)' == 'false' ">
+        <PackageReference Include="Microsoft.CodeAnalysis.PublicApiAnalyzers">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+    </ItemGroup>
+    <ItemGroup Condition=" '$(IsUnitTestProject)' == 'true' ">
+        <PackageReference Include="Microsoft.Testing.Extensions.GitHubActionsReport" PrivateAssets="all" />
+        <PackageReference Include="coverlet.MTP" />
+        <PackageReference Include="JunitXml.TestLogger" />
+        <PackageReference Include="Microsoft.NET.Test.Sdk" />
+        <PackageReference Include="NSubstitute" />
+        <PackageReference Include="NUnit" />
+        <PackageReference Include="NUnit.Analyzers">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+        <PackageReference Include="NUnit3TestAdapter" />
+        <PackageReference Include="Shouldly" />
+    </ItemGroup>
+    <ItemGroup Condition=" '$(IsUnitTestProject)' == 'true' ">
+        <ProjectReference Include="..\GitVersion.Testing\GitVersion.Testing.csproj" />
+
+        <Using Include="NSubstitute" />
+        <Using Include="NUnit.Framework" />
+        <Using Include="Shouldly" />
+        <Using Include="GitVersion.Testing" />
+    </ItemGroup>
+
+    <ItemGroup Label="SystemUsings">
+        <Using Include="System" />
+        <Using Include="System.IO" />
+        <Using Include="System.Linq" />
+        <Using Include="System.Collections.Generic" />
+        <Using Include="System.Collections" />
+        <Using Include="System.Collections.Specialized" />
+        <Using Include="System.Diagnostics" />
+        <Using Include="System.Reflection" />
+        <Using Include="System.Text" />
+        <Using Include="System.Text.Json" />
+        <Using Include="System.Text.Json.Serialization" />
+        <Using Include="System.Xml" />
+        <Using Include="System.Environment" Alias="SysEnv" />
+    </ItemGroup>
+
+    <ItemGroup Label="MicrosoftExtensionsUsings">
+        <Using Include="Microsoft.Extensions.DependencyInjection" />
+        <Using Include="Microsoft.Extensions.DependencyInjection.Extensions" />
+        <Using Include="Microsoft.Extensions.Logging" />
+        <Using Include="Microsoft.Extensions.Logging.Abstractions" />
+        <Using Include="Microsoft.Extensions.Options" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="../../docs/input/docs/img/package_icon.png" Pack="true" PackagePath="/" />
+        <None Include="../../build/nuspec/README.md" Pack="true" PackagePath="/" />
+    </ItemGroup>
+
+    <!-- Workaround to enable .editorconfig based analyzer configuration until dotnet compilers support .editorconfig based configuration -->
+    <PropertyGroup>
+        <SkipDefaultEditorConfigAsAdditionalFile>true</SkipDefaultEditorConfigAsAdditionalFile>
+    </PropertyGroup>
+
+</Project>

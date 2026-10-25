@@ -1,0 +1,86 @@
+using GitVersion.Extensions;
+
+namespace GitVersion.VersionCalculation.Mainline.NonTrunk;
+
+internal abstract class MergeCommitOnNonTrunkBase : IIncrementer
+{
+    public virtual bool MatchPrecondition(MainlineIteration iteration, MainlineCommit commit, MainlineContext context)
+        => commit.HasChildIteration
+           && !commit.GetEffectiveConfiguration(context.Configuration).IsMainBranch
+           && context.SemanticVersion is null;
+
+    public virtual IEnumerable<IBaseVersionIncrement> GetIncrements(
+        MainlineIteration iteration, MainlineCommit commit, MainlineContext context)
+    {
+        if (commit.ChildIteration is null)
+        {
+            throw new InvalidOperationException("The commit child iteration is null.");
+        }
+
+        return GetIncrementsInternal();
+
+        IEnumerable<IBaseVersionIncrement> GetIncrementsInternal()
+        {
+            var baseVersion = MainlineVersionStrategy.DetermineBaseVersionRecursive(
+                   iteration: commit.ChildIteration,
+                   targetLabel: context.TargetLabel,
+                   incrementStrategyFinder: context.IncrementStrategyFinder,
+                   configuration: context.Configuration,
+                   environment: context.Environment,
+                   currentCommit: context.CurrentCommit
+               );
+
+            context.Label ??= baseVersion.Operator?.Label;
+            context.Increment = ConsolidateIncrement(commit, context, baseVersion);
+            ApplyBaseVersion(context, baseVersion);
+
+            yield break;
+        }
+    }
+
+    private static VersionField ConsolidateIncrement(MainlineCommit commit, MainlineContext context, BaseVersion baseVersion)
+    {
+        var effectiveConfiguration = commit.GetEffectiveConfiguration(context.Configuration);
+        var increment = VersionField.None;
+
+        if (!effectiveConfiguration.PreventIncrementOfMergedBranch)
+        {
+            increment = increment.Consolidate(context.Increment);
+        }
+
+        if (!effectiveConfiguration.PreventIncrementWhenBranchMerged)
+        {
+            increment = increment.Consolidate(baseVersion.Operator?.Increment);
+        }
+
+        if (effectiveConfiguration.CommitMessageIncrementing != CommitMessageIncrementMode.Disabled)
+        {
+            increment = increment.Consolidate(commit.Increment);
+        }
+
+        return increment;
+    }
+
+    private static void ApplyBaseVersion(MainlineContext context, BaseVersion baseVersion)
+    {
+        if (baseVersion.BaseVersionSource is not null)
+        {
+            context.BaseVersionSource = baseVersion.BaseVersionSource;
+            context.SemanticVersion = baseVersion.SemanticVersion;
+            context.SemVerSource = baseVersion.GetBaselineSemVerSource();
+            return;
+        }
+
+        if (baseVersion.SemanticVersion != SemanticVersion.Empty)
+        {
+            context.AddAlternativeSemanticVersion(baseVersion.SemanticVersion, baseVersion.GetBaselineSemVerSource() with { Increment = VersionField.None });
+        }
+
+        if (baseVersion.Operator?.AlternativeSemanticVersion is not null)
+        {
+            context.AddAlternativeSemanticVersion(baseVersion.Operator.AlternativeSemanticVersion,
+                baseVersion.Operator.AlternativeSemVerSource ?? new SemanticVersionSource(
+                    "Alternative semantic version", baseVersion.Operator.AlternativeSemanticVersion, null, VersionField.None));
+        }
+    }
+}

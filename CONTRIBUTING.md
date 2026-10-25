@@ -1,0 +1,305 @@
+# Contributing to GitVersion
+
+We love contributions to get started contributing you might need:
+
+* [Get started with git][get-started-with-git]
+* [How to create a pull request][how-to-create-a-pull-request]
+* [An issue to work on][an-issue-to-work-on] - We are on [Up for grabs][up-for-grabs], our up for grabs issues are tagged `up-for-grabs`
+* An understanding of our [architecture][architecture] and how [we write tests][we-write-tests]
+
+Once you know how to create a pull request and have an issue to work on, just post a comment saying you will work on it.
+If you end up not being able to complete the task, please post another comment so others can pick it up.
+
+Issues are also welcome, [failing tests][we-write-tests] are even more welcome.
+
+## Contribution Guidelines
+
+* Try to use feature branches rather than developing on main.
+* Please include tests covering the change.
+* The documentation is stored in the repository under the [`docs`][docs] folder.
+  Have a look at the [documentation readme file][documentation-readme-file] for guidance
+  on how to improve the documentation and please include documentation updates
+  with your PR.
+
+### C# language and compiler compatibility
+
+Use the SDK pinned in `global.json`. Shared .NET 10/.NET 11 source, build tooling,
+and the experimental CLI use `LangVersion=latest`, selecting the latest language
+version supported by that compiler. Check runtime and API requirements separately
+when adopting syntax in code that also targets .NET 10.
+
+The source generator retains its `netstandard2.0` target and PolySharp support.
+Its generated code must compile for a C# 14/.NET 10 consumer. Its Roslyn package
+version also constrains which compiler hosts can load it; building with the
+pinned SDK and running generator tests are separate compatibility checks.
+The docs parser uses its own Roslyn package and must preserve API symbols and
+XML comments independently of the SDK compiler. Roslyn 5.9 still requires
+`LanguageVersion.Preview` to parse C# 15 collection-expression arguments, so the
+docs parser enables it while project compilation remains on `LangVersion=latest`.
+The compatibility fixture covers C# 14 and C# 15 syntax. Revisit this parser setting
+with the GA Roslyn package and revalidate it when adopting newer syntax.
+
+Build tooling will move to .NET 11 at GA; the deferred `DocsInputs`
+collection-arguments cleanup belongs
+with that upgrade, preserving case-insensitive reserved-path validation.
+
+### Git history & pull request updates
+
+We prefer a **linear commit history**.
+
+* Keep your branch **up to date by rebasing on `main`** (not by merging `main` into your branch).
+* Prefer **atomic commits**: each commit should represent one logical change and leave the repo in a working state.
+* **Don’t squash everything into one commit** by default.
+  Squash is fine when it helps you *create atomic commits* (for example, folding “fix tests” into the commit that introduced the tests).
+
+A typical workflow looks like:
+
+```shell
+# update your local main
+git fetch origin
+git checkout main
+git pull --ff-only
+
+# rebase your feature branch onto the latest main
+git checkout my-feature
+git rebase origin/main
+
+# if your branch is already on GitHub, you'll likely need a force push after rebasing
+git push --force-with-lease
+```
+
+If you need to reorganize commits (split/merge/reword) before opening the PR, use an interactive rebase:
+
+```shell
+git rebase -i origin/main
+```
+
+## How it works
+
+See [how it works][how-it-works] in GitVersion's documentation
+
+## Writing Tests
+
+We have made it super easy to write tests in GitVersion. Most tests you are interested in are in `GitVersion.Core.Tests\IntegrationTests`.
+
+There is a scenario class for each type of branch. For example MainScenarios, FeatureBranchScenarios etc.
+
+### 1. Find Appropriate Scenario class
+
+Find where your issue would logically sit. Or create a new scenario class if it doesn't fit anywhere in particular.
+
+### 2. Create a test method
+
+We are currently using NUnit, so just create a descriptive test method and attribute it with `[Test]`
+
+### 3. Create a configuration
+
+We use a builder pattern to create a configuration. You can use the `GitFlowConfigurationBuilder` or `GitHubConfigurationBuilder` or `EmptyConfigurationBuilder` to create a configuration builder.
+
+```csharp
+var configurationBuilder = GitFlowConfigurationBuilder.New;
+```
+
+We can then customize the configuration by chaining methods of the builder. At the end we build the configuration.
+
+For example:
+
+```csharp
+var configuration = configurationBuilder
+    .WithDeploymentMode(DeploymentMode.ContinuousDeployment)
+    .WithNextVersion("1.0.0")
+    .Build();
+```
+
+### 4. Use a fixture
+
+We have a few fixtures for different scenarios.
+
+* `EmptyRepositoryFixture` - Gives you an empty git repo to start with
+* `RemoteRepositoryFixture` - A local repo tracking a test remote repository. The remote repo is available through the `Repository` property, the local is accessible via `LocalRepository`
+* `BaseGitFlowRepositoryFixture` - A repo setup for GitFlow (has a develop branch checked out ready to go)
+
+You can use a fixture by just `using` it. Like this
+
+```csharp
+using var repo = new EmptyRepositoryFixture();
+```
+
+### 5. Writing the scenario
+
+We have a number of extension method off `IRepository` to make it easy to write tests at the flow level and not worry about creating/commiting files.
+
+An example test looks like this:
+
+```csharp
+fixture.Repository.MakeATaggedCommit("1.0.0");
+fixture.Repository.CreateBranch("feature-test");
+fixture.Repository.Checkout("feature-test");
+fixture.Repository.MakeACommit();
+fixture.Repository.MakeCommits(4);
+
+fixture.AssertFullSemver("1.0.1-test.1-5", configuration);
+```
+
+The last line is the most important. `AssertFullSemver` will run GitVersion and assert that the full SemVer it calculates is what you expect.
+
+### 6. Submit a pull request with the failing test
+
+Even better include the fix, but a failing test is a great start
+
+## Release Process
+
+We use Cake for our build and deployment process. The way the release process is setup is:
+
+1. We build releasable artifacts with GitHub Actions
+2. We create a milestone for the release if it's not already created. Our milestones are named using the semver.
+   For example `5.12.0` or `6.0.0-beta.2`
+3. We move all the closed issues and closed pull requests that are going to be included in the release to the milestone.
+4. We check that all the issues and pull requests that are going to be included in the release have a label assigned,
+   otherwise it will fail the release.
+5. We create a release in the GitHub UI, and create a tag and name it using the milestone name. For example `5.12.0` or `6.0.0-beta.2`
+6. We specify if the release is a pre-release or latest release in the GitHub UI.
+7. We publish the release.
+8. The GitHub Actions will create a GitHub release and publish the artifacts to NuGet, Chocolatey, Docker, Homebrew
+   and other distribution channels.
+9. The issues and pull requests will get updated with message specifying in which release it was included.
+
+### Running the release with the `release` agent skill
+
+Steps 2–9 above are automated by the `release` agent skill, kept at [`.agents/skills/release/SKILL.md`][agents-skills-release-skill-md]
+(also symlinked at `.claude/skills/release` for tool discovery, and referenced from [`AGENTS.md`][agents-md]). It walks
+through milestone setup, GitReleaseManager label validation, creating the GitHub release, monitoring the downstream
+publish PRs (Homebrew, winget, GitTools Actions), and verifying published artifacts (NuGet, Docker, Chocolatey, docs schema).
+
+All three supported coding agents resolve to the same skill file, with different invocation mechanics:
+
+* **Claude Code** has native skill support. Open a session in the repo root and run:
+
+  ```text
+  /release
+  ```
+
+  or ask the assistant to run the `release` skill directly if slash commands aren't available in your client.
+
+* **GitHub Copilot** reads [`.github/copilot-instructions.md`][github-copilot-instructions-md], which points to `AGENTS.md`.
+  Ask Copilot Chat (or the Copilot coding agent) to perform a GitVersion release; it should follow the pointer to
+  `AGENTS.md` and from there to the skill file. If it doesn't pick up the pointer on its own, explicitly ask it to
+  read `.agents/skills/release/SKILL.md` and follow its phases in order.
+
+* **Codex CLI** reads `AGENTS.md` automatically as repo-specific guidance. Ask it to perform a GitVersion release;
+  it should follow the `AGENTS.md` pointer to `.agents/skills/release/SKILL.md`. As with Copilot, you can also
+  reference the skill file path directly if it doesn't follow the pointer unprompted.
+
+In every case, the skill requires the `gh` CLI installed and authenticated (`gh auth login`) — Phase 0 checks this
+before doing anything else.
+
+The skill is interactive: it stops at each phase to show its findings and confirm next steps with you (e.g. before
+creating the GitHub release, before fixing label issues, before retrying a failed publish workflow). It does not
+wait for downstream PRs to merge — once a PR is confirmed created it's linked in the summary and considered done.
+
+### NuGet Trusted Publishing
+
+NuGet packages are published to nuget.org using [Trusted Publishing][trusted-publishing],
+which replaces long-lived API keys with short-lived, identity-based tokens issued by GitHub Actions OIDC.
+
+#### How it works
+
+1. The publish workflow requests a GitHub OIDC token scoped to `https://www.nuget.org`.
+2. That token is exchanged with the nuget.org token service for a short-lived API key.
+3. Packages are pushed using that short-lived key — no long-lived secret is stored or rotated.
+
+#### One-time setup on nuget.org
+
+Trusted Publishing is configured once for the repository and workflow — not per package. A single trusted
+publisher entry covers every package pushed by the same workflow run.
+
+1. Sign in to [nuget.org][nuget-org] as a package owner.
+2. Go to **Account settings** → **Trusted Publishers** (or navigate to any of the
+   [GitVersion packages][gitversion-packages] and open **Manage package** → **Settings** →
+   **Trusted Publishers**).
+3. Click **Add trusted publisher** and fill in the following fields:
+
+   | Field                  | Value           |
+   |------------------------|-----------------|
+   | **Publisher type**     | GitHub Actions  |
+   | **Owner**              | `GitTools`      |
+   | **Repository**         | `GitVersion`    |
+   | **Workflow file name** | `ci.yml`        |
+   | **Environment**        | *(leave blank)* |
+
+4. Click **Add** to save the entry.
+
+> **Note:** nuget.org will only issue a short-lived key when the OIDC claims from the workflow run match *all*
+> registered fields exactly. A mismatch on any field (e.g. wrong workflow file name) will cause the token
+> exchange to fail and the publish step will fall back to the static `NUGET_API_KEY`.
+
+#### Verification and troubleshooting
+
+* If the OIDC token exchange fails the workflow falls back to a static `NUGET_API_KEY` environment variable
+  loaded from 1Password via the `gittools/cicd/nuget-creds@v1` action. Check the "Publishing to Nuget.org" log
+  group for error details.
+* The publish job requires `id-token: write` permission, which is declared in `.github/workflows/_publish.yml`.
+* If a package fails to publish with a permissions error, verify that nuget.org Trusted Publishing is configured
+  and that the owner, repository, and workflow file name match exactly.
+
+## Code Style
+
+In order to apply the code style defined by by the `.editorconfig` file you can use [`dotnet-format`][dotnet-format].
+
+Change to the root folder of the GitVersion repository and use the following command to apply the code style:
+
+```shell
+dotnet format ./src/ --exclude **/AddFormats/
+```
+
+## Documentation
+
+The documentation is stored in the repository under the [`docs`][docs] folder.
+Have a look at the [documentation readme file][documentation-readme-file] for guidance.
+
+In order to check locally how the documentation looks like you can use the following command:
+
+```shell
+./build.ps1 -Stage docs -Target PreviewDocs
+```
+
+## Schemas generation
+
+If there are changes to the GitVersionVariables or to the GitVersionConfiguration, the following command should be executed to update the schema files:
+
+```shell
+./build.ps1 -Stage build -Target BuildPrepare
+./build.ps1 -Stage docs -Target GenerateSchemas
+```
+
+[get-started-with-git]: https://rogerdudler.github.io/git-guide
+
+[how-to-create-a-pull-request]: https://help.github.com/articles/using-pull-requests
+
+[an-issue-to-work-on]: https://github.com/GitTools/GitVersion/labels/up-for-grabs
+
+[up-for-grabs]: https://up-for-grabs.net/
+
+[architecture]: https://gitversion.net/docs/learn/how-it-works#architecture
+
+[we-write-tests]: #writing-tests
+
+[docs]: docs
+
+[documentation-readme-file]: docs/readme.md
+
+[how-it-works]: https://gitversion.net/docs/learn/how-it-works
+
+[agents-skills-release-skill-md]: .agents/skills/release/SKILL.md
+
+[agents-md]: AGENTS.md
+
+[github-copilot-instructions-md]: .github/copilot-instructions.md
+
+[trusted-publishing]: https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing
+
+[nuget-org]: https://www.nuget.org
+
+[gitversion-packages]: https://www.nuget.org/profiles/GitTools
+
+[dotnet-format]: https://github.com/dotnet/format

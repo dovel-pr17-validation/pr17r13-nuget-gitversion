@@ -1,0 +1,46 @@
+name: 'Docker Test'
+description: 'Docker Test Images'
+inputs:
+  arch:
+    description: 'Docker architecture'
+    default: 'amd64'
+  docker_distro:
+    description: 'Linux Distro'
+    default: 'ubuntu.26.04'
+  dotnet_version:
+    description: '.net version'
+    default: '8.0'
+  git_backend:
+    description: 'Git backend to exercise (libgit2 or managed)'
+    default: 'libgit2'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: '[Docker Build & Test] DockerHub'
+      uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+      env:
+        GITVERSION_GIT_BACKEND: ${{ inputs.git_backend }}
+      with:
+        shell: pwsh
+        timeout_minutes: 30
+        max_attempts: 3
+        retry_on: error
+        command: |
+          dotnet run/docker.dll --target=DockerTest `
+                --arch=${{ inputs.arch }} --dotnet_version=${{ inputs.dotnet_version }} `
+                --docker_distro=${{ inputs.docker_distro }} --docker_registry dockerhub --verbosity=diagnostic
+
+    - name: '[Docker Build & Test] GitHub'
+      uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+      env:
+        GITVERSION_GIT_BACKEND: ${{ inputs.git_backend }}
+      with:
+        shell: pwsh
+        timeout_minutes: 30
+        max_attempts: 3
+        retry_on: error
+        command: |
+          dotnet run/docker.dll --target=DockerTest `
+                --arch=${{ inputs.arch }} --dotnet_version=${{ inputs.dotnet_version }} `
+                --docker_distro=${{ inputs.docker_distro }} --docker_registry github --verbosity=diagnostic

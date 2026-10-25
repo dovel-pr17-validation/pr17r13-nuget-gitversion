@@ -1,0 +1,193 @@
+using System.IO.Abstractions;
+using System.Security.Cryptography;
+using GitVersion.Configuration;
+using GitVersion.Extensions;
+using GitVersion.Git;
+using GitVersion.Helpers;
+
+namespace GitVersion.VersionCalculation.Caching;
+
+internal class GitVersionCacheKeyFactory(
+    IFileSystem fileSystem,
+    ILogger<GitVersionCacheKeyFactory> logger,
+    CacheRepositoryTargetProvider repositoryTarget,
+    CacheConfigurationContentProvider configurationContent,
+    IRepositoryStore repositoryStore,
+    IGitRepositoryInfo repositoryInfo)
+    : IGitVersionCacheKeyFactory
+{
+    private readonly ILogger<GitVersionCacheKeyFactory> logger = logger.NotNull();
+    private readonly IFileSystem fileSystem = fileSystem.NotNull();
+    private readonly IRepositoryStore repositoryStore = repositoryStore.NotNull();
+    private readonly IGitRepositoryInfo repositoryInfo = repositoryInfo.NotNull();
+
+    public GitVersionCacheKey Create(IReadOnlyDictionary<object, object?>? overrideConfiguration)
+    {
+        var gitSystemHash = GetGitSystemHash();
+        var configFileHash = GetHash(configurationContent.GetFileContent());
+        var repositorySnapshotHash = GetRepositorySnapshotHash();
+        var repositoryTargetHash = GetHash(repositoryTarget.GetTarget());
+        var overrideConfigHash = GetHash(configurationContent.GetOverrideContent(overrideConfiguration));
+        var configurationVersionHash = GetHash(ConfigurationVersionSelector.ResolveName());
+
+        var compositeHash = GetHash(gitSystemHash, configFileHash, repositorySnapshotHash, repositoryTargetHash, overrideConfigHash, configurationVersionHash, "separate-semver-and-count-sources-v1");
+        return new(compositeHash);
+    }
+
+    private string GetGitSystemHash()
+    {
+        var dotGitDirectory = this.repositoryInfo.DotGitDirectory;
+
+        // traverse the directory and get a list of files, use that for GetHash.
+        // The refs directory may not exist when all refs are packed (e.g. a fresh
+        // clone by recent versions of git writes refs to packed-refs only).
+        var refsPath = FileSystemHelper.Path.Combine(dotGitDirectory, "refs");
+        var contents = this.fileSystem.Directory.Exists(refsPath)
+            ? CalculateDirectoryContents(refsPath)
+            : [];
+
+        // Refs may live partially or entirely in packed-refs instead of loose files
+        // under refs/, so its content must contribute to the hash for packed ref
+        // updates (e.g. a fetched tag) to invalidate the cache.
+        var packedRefsPath = FileSystemHelper.Path.Combine(dotGitDirectory, "packed-refs");
+        AddFileContents([packedRefsPath], contents);
+
+        return GetHash(contents);
+    }
+
+    // based on https://msdn.microsoft.com/en-us/library/bb513869.aspx
+    private List<string> CalculateDirectoryContents(string root)
+    {
+        var result = new List<string>();
+
+        // Data structure to hold names of subfolders to be
+        // examined for files.
+        var dirs = new Stack<string>();
+
+        if (!this.fileSystem.Directory.Exists(root))
+        {
+            throw new DirectoryNotFoundException($"Root directory does not exist: {root}");
+        }
+
+        dirs.Push(root);
+
+        while (dirs.Count != 0)
+        {
+            var currentDir = dirs.Pop();
+
+            var di = this.fileSystem.DirectoryInfo.New(currentDir);
+            result.Add(di.Name);
+
+            var subDirs = TryGetDirectories(currentDir);
+            if (subDirs is null)
+            {
+                continue;
+            }
+
+            var files = TryGetFiles(currentDir);
+            if (files is null)
+            {
+                continue;
+            }
+
+            AddFileContents(files, result);
+
+            // Push the subdirectories onto the stack for traversal.
+            // This could also be done before handing the files.
+            // push in reverse order
+            for (var i = subDirs.Length - 1; i >= 0; i--)
+            {
+                dirs.Push(subDirs[i]);
+            }
+        }
+
+        return result;
+    }
+
+    private string[]? TryGetDirectories(string currentDir)
+    {
+        try
+        {
+            return this.fileSystem.Directory.GetDirectories(currentDir);
+        }
+        // An UnauthorizedAccessException exception will be thrown if we do not have
+        // discovery permission on a folder or file. It may or may not be acceptable
+        // to ignore the exception and continue enumerating the remaining files and
+        // folders. It is also possible (but unlikely) that a DirectoryNotFound exception
+        // will be raised. This will happen if currentDir has been deleted by
+        // another application or thread after our call to Directory.Exists. The
+        // choice of which exceptions to catch depends entirely on the specific task
+        // you are intending to perform and also on how much you know with certainty
+        // about the systems on which this code will run.
+        catch (Exception ex) when (ex is UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            this.logger.LogError(ex, "{Message}", ex.Message);
+            return null;
+        }
+    }
+
+    private string[]? TryGetFiles(string currentDir)
+    {
+        try
+        {
+            return this.fileSystem.Directory.GetFiles(currentDir);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            this.logger.LogError(ex, "{Message}", ex.Message);
+            return null;
+        }
+    }
+
+    private void AddFileContents(string[] files, List<string> result)
+    {
+        foreach (var file in files)
+        {
+            try
+            {
+                if (!this.fileSystem.File.Exists(file))
+                {
+                    continue;
+                }
+
+                result.Add(FileSystemHelper.Path.GetFileName(file));
+                result.Add(this.fileSystem.File.ReadAllText(file));
+            }
+            catch (IOException e)
+            {
+                this.logger.LogError(e, "{Message}", e.Message);
+            }
+        }
+    }
+
+    private string GetRepositorySnapshotHash()
+    {
+        var head = this.repositoryStore.Head;
+        if (head.Tip == null)
+        {
+            return head.Name.Canonical;
+        }
+
+        var hash = string.Join(":", head.Name.Canonical, head.Tip.Sha);
+        return GetHash(hash);
+    }
+
+    private static string GetHash(params IEnumerable<string> textsToHash)
+    {
+        var textToHash = string.Join(":", textsToHash);
+        return GetHash(textToHash);
+    }
+
+    private static string GetHash(string textToHash)
+    {
+        if (textToHash.IsNullOrEmpty())
+        {
+            return string.Empty;
+        }
+
+        var bytes = Encoding.UTF8.GetBytes(textToHash);
+        var hashedBytes = SHA1.HashData(bytes);
+        var hashedString = BitConverter.ToString(hashedBytes);
+        return hashedString.Replace("-", "");
+    }
+}

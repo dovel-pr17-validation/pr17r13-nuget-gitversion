@@ -1,0 +1,42 @@
+name: Release
+on:
+  release:
+    types: [ published ]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Trigger ci flow
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Get version
+        id: get-version
+        shell: pwsh
+        run: |
+          # Finding the version from release tag
+          $TAG="${{ github.ref }}".Replace("refs/tags/", "")
+          "tag=$TAG" >> $env:GITHUB_OUTPUT
+
+      - uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          event-type: ci-release
+          client-payload: |
+            {
+              "ref": "${{ github.ref }}",
+              "sha": "${{ github.sha }}",
+              "tag": "${{ steps.get-version.outputs.tag }}"
+            }

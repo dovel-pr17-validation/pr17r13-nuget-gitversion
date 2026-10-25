@@ -1,0 +1,1 @@
+calculate -l ./logs/log.txt --work-dir . --verbosity verbose

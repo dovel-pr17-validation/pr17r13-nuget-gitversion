@@ -1,0 +1,505 @@
+using System.Globalization;
+using GitVersion.Configuration;
+using GitVersion.Git;
+using GitVersion.VersionCalculation;
+
+namespace GitVersion.Tests;
+
+[TestFixture]
+public class VariableProviderTests : TestBase
+{
+    private IVariableProvider variableProvider = null!;
+    private readonly DateTimeOffset commitDate = DateTimeOffset.Parse("2014-03-06 23:59:59Z", CultureInfo.InvariantCulture);
+
+    [SetUp]
+    public void Setup()
+    {
+        ShouldlyConfiguration.ShouldMatchApprovedDefaults.LocateTestMethodUsingAttribute<TestAttribute>();
+
+        List<string> logMessages = [];
+
+        var loggerFactory = new TestLoggerFactory(logMessages.Add);
+        var sp = ConfigureServices(services => loggerFactory.RegisterWith(services));
+
+        this.variableProvider = sp.GetRequiredService<IVariableProvider>();
+    }
+
+    [Test]
+    public void ProvidesVariablesInContinuousDeliveryModeForPreRelease()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            PreReleaseTag = "unstable.4",
+            BuildMetaData = new("5.Branch.develop")
+            {
+                VersionSourceSha = "versionSourceSha",
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                CommitDate = this.commitDate
+            }
+        };
+
+        var configuration = GitFlowConfigurationBuilder.New.Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.ToJson().ShouldMatchApproved(c => c.SubFolder("Approved"));
+    }
+
+    [Test]
+    public void ProvidesVariablesInContinuousDeploymentModeForPreRelease()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            PreReleaseTag = new("unstable", 8, true),
+            BuildMetaData = new("Branch.develop")
+            {
+                VersionSourceSha = "versionSourceSha",
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                VersionSourceDistance = 5,
+                CommitDate = this.commitDate
+            }
+        };
+
+        var configuration = GitFlowConfigurationBuilder.New.Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.ToJson().ShouldMatchApproved(c => c.SubFolder("Approved"));
+    }
+
+    [Test]
+    public void ProvidesVariablesInContinuousDeliveryModeForStable()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            BuildMetaData = new("5.Branch.develop")
+            {
+                VersionSourceSha = "versionSourceSha",
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                CommitDate = this.commitDate
+            }
+        };
+
+        var configuration = GitFlowConfigurationBuilder.New.WithTagPreReleaseWeight(0).Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.ToJson().ShouldMatchApproved(c => c.SubFolder("Approved"));
+    }
+
+    [Test]
+    public void ProvidesVariablesInContinuousDeploymentModeForStable()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            PreReleaseTag = new("ci", 5, true),
+            BuildMetaData = new("Branch.develop")
+            {
+                VersionSourceSha = "versionSourceSha",
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                VersionSourceDistance = 5,
+                CommitDate = this.commitDate
+            }
+        };
+
+        var configuration = GitFlowConfigurationBuilder.New.Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.ToJson().ShouldMatchApproved(c => c.SubFolder("Approved"));
+    }
+
+    [Test]
+    public void ProvidesVariablesInContinuousDeploymentModeForStableWhenCurrentCommitIsTagged()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            BuildMetaData = new()
+            {
+                VersionSourceSha = "versionSourceSha",
+                CommitsSinceTag = 5,
+                VersionSourceDistance = 5,
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                CommitDate = this.commitDate
+            }
+        };
+
+        var configuration = GitFlowConfigurationBuilder.New.WithTagPreReleaseWeight(0).Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.ToJson().ShouldMatchApproved(c => c.SubFolder("Approved"));
+    }
+
+    [Test]
+    public void ProvidesVariablesInContinuousDeploymentModeWithTagNamePattern()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            PreReleaseTag = new("PullRequest2", 5, true),
+            BuildMetaData = new("Branch.develop")
+            {
+                Branch = "pull/2/merge",
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                CommitDate = this.commitDate
+            }
+        };
+
+        var configuration = GitFlowConfigurationBuilder.New.Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.FullSemVer.ShouldBe("1.2.3-PullRequest2.5");
+    }
+
+    [Test]
+    public void ProvidesVariablesInContinuousDeploymentModeWithTagSetToBranchName()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            PreReleaseTag = new("feature", 5, true),
+            BuildMetaData = new("Branch.develop")
+            {
+                Branch = "feature",
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                CommitDate = this.commitDate
+            }
+        };
+
+        var configuration = GitFlowConfigurationBuilder.New.Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.FullSemVer.ShouldBe("1.2.3-feature.5");
+    }
+
+    [Test]
+    public void ProvidesVariablesInContinuousDeliveryModeForFeatureBranch()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            BuildMetaData = new("5.Branch.feature/123")
+            {
+                Branch = "feature/123",
+                VersionSourceSha = "versionSourceSha",
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                CommitDate = this.commitDate
+            }
+        };
+
+        var configuration = GitFlowConfigurationBuilder.New.WithTagPreReleaseWeight(0).Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.ToJson().ShouldMatchApproved(c => c.SubFolder("Approved"));
+    }
+
+    [Test]
+    public void ProvidesVariablesInContinuousDeliveryModeForFeatureBranchWithCustomAssemblyInfoFormat()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            BuildMetaData = new("5.Branch.feature/123")
+            {
+                Branch = "feature/123",
+                VersionSourceSha = "versionSourceSha",
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                CommitDate = this.commitDate
+            }
+        };
+
+        var configuration = GitFlowConfigurationBuilder.New.WithTagPreReleaseWeight(0)
+            .WithAssemblyInformationalFormat("{Major}.{Minor}.{Patch}+{VersionSourceDistance}.Branch.{BranchName}.Sha.{ShortSha}")
+            .Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.ToJson().ShouldMatchApproved(c => c.SubFolder("Approved"));
+    }
+
+    [Test]
+    public void ProvidesVariablesInContinuousDeploymentModeForMainBranchWithEmptyLabel()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            PreReleaseTag = new(string.Empty, 9, true),
+            BuildMetaData = new("Branch.main")
+            {
+                Branch = "main",
+                VersionSourceSha = "versionSourceSha",
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                VersionSourceDistance = 5,
+                CommitDate = this.commitDate
+            }
+        };
+
+        var configuration = GitFlowConfigurationBuilder.New.Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration(ReferenceName.FromBranchName("main"));
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.ToJson().ShouldMatchApproved(x => x.SubFolder("Approved"));
+    }
+
+    [Test]
+    public void CustomVersionIsEmptyWhenFormatIsNotConfigured()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            BuildMetaData = new()
+        };
+        var configuration = GitFlowConfigurationBuilder.New.Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.CustomVersion.ShouldBeEmpty();
+    }
+
+    [Test]
+    public void CustomVersionSupportsPep440FormatForIssue2065()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 0,
+            Minor = 6,
+            Patch = 3,
+            PreReleaseTag = new("beta", 10, true),
+            BuildMetaData = new()
+        };
+        var configuration = GitFlowConfigurationBuilder.New
+            .WithCustomVersionFormat("{Major}.{Minor}.{Patch}{PreReleaseLabelName:l}{PreReleaseNumber}")
+            .Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.CustomVersion.ShouldBe("0.6.3beta10");
+    }
+
+    [TestCase("beta", 99, "beta", "99", "beta.99", "-beta", "-beta.99")]
+    [TestCase("", 99, "", "99", "99", "", "-99")]
+    [TestCase(null, null, "", "", "", "", "")]
+    public void ProvidesUnambiguousPreReleaseVariables(
+        string? labelName, long? number,
+        string expectedLabelName, string expectedNumber, string expectedLabel,
+        string expectedLabelNameWithDash, string expectedLabelWithDash)
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            PreReleaseTag = labelName is null && number is null
+                ? SemanticVersionPreReleaseTag.Empty
+                : new(labelName ?? string.Empty, number, true),
+            BuildMetaData = new()
+        };
+        var configuration = GitFlowConfigurationBuilder.New.Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.PreReleaseLabelName.ShouldBe(expectedLabelName);
+        variables.PreReleaseLabelNameWithDash.ShouldBe(expectedLabelNameWithDash);
+        variables.PreReleaseNumber.ShouldBe(expectedNumber);
+        variables.PreReleaseLabel.ShouldBe(expectedLabel);
+        variables.PreReleaseLabelWithDash.ShouldBe(expectedLabelWithDash);
+
+        var roundTrippedVariables = variables.ToJson().ToGitVersionVariables();
+        roundTrippedVariables.PreReleaseLabelName.ShouldBe(expectedLabelName);
+        roundTrippedVariables.PreReleaseLabelNameWithDash.ShouldBe(expectedLabelNameWithDash);
+        roundTrippedVariables.PreReleaseNumber.ShouldBe(expectedNumber);
+        roundTrippedVariables.PreReleaseLabel.ShouldBe(expectedLabel);
+        roundTrippedVariables.PreReleaseLabelWithDash.ShouldBe(expectedLabelWithDash);
+    }
+
+    [Test]
+    public void CustomVersionFormatCanBeConfiguredPerBranch()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            BuildMetaData = new()
+        };
+        var configurationBuilder = GitFlowConfigurationBuilder.New
+            .WithCustomVersionFormat("{SemVer}-global");
+        configurationBuilder.WithBranch("feature")
+            .WithCustomVersionFormat("{SemVer}-feature");
+        configurationBuilder.WithBranch("release")
+            .WithCustomVersionFormat(string.Empty);
+        var configuration = configurationBuilder.Build();
+        var featureConfiguration = configuration.GetEffectiveConfiguration(ReferenceName.FromBranchName("feature/example"));
+        var mainConfiguration = configuration.GetEffectiveConfiguration(ReferenceName.FromBranchName("main"));
+        var releaseConfiguration = configuration.GetEffectiveConfiguration(ReferenceName.FromBranchName("release/1.2.3"));
+
+        var featureVariables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, featureConfiguration);
+        var mainVariables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, mainConfiguration);
+        var releaseVariables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, releaseConfiguration);
+
+        featureVariables.CustomVersion.ShouldBe("1.2.3-feature");
+        mainVariables.CustomVersion.ShouldBe("1.2.3-global");
+        releaseVariables.CustomVersion.ShouldBeEmpty();
+    }
+
+    [Test]
+    public void CustomVersionSupportsMonotonicallyIncreasingIntegerFormatForIssue3340()
+    {
+        var configuration = GitFlowConfigurationBuilder.New
+            .WithCustomVersionFormat("{Major:00}{Minor:00}{Patch:000}")
+            .Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var patchVersion = this.variableProvider.GetVariablesFor(new SemanticVersion
+        {
+            Major = 0,
+            Minor = 0,
+            Patch = 123,
+            BuildMetaData = new()
+        }, configuration, effectiveConfiguration);
+        var minorVersion = this.variableProvider.GetVariablesFor(new SemanticVersion
+        {
+            Major = 0,
+            Minor = 1,
+            Patch = 0,
+            BuildMetaData = new()
+        }, configuration, effectiveConfiguration);
+
+        patchVersion.CustomVersion.ShouldBe("0000123");
+        minorVersion.CustomVersion.ShouldBe("0001000");
+        var patchVersionCode = long.Parse(patchVersion.CustomVersion!, CultureInfo.InvariantCulture);
+        var minorVersionCode = long.Parse(minorVersion.CustomVersion!, CultureInfo.InvariantCulture);
+        minorVersionCode.ShouldBeGreaterThan(patchVersionCode);
+    }
+
+    [Test]
+    public void Format_Allows_CSharp_FormatStrings()
+    {
+        var semanticVersion = new SemanticVersion
+        {
+            Major = 1,
+            Minor = 2,
+            Patch = 3,
+            PreReleaseTag = new(string.Empty, 9, true),
+            BuildMetaData = new("Branch.main")
+            {
+                Branch = "main",
+                VersionSourceSha = "versionSourceSha",
+                Sha = "commitSha",
+                ShortSha = "commitShortSha",
+                VersionSourceDistance = 42,
+                CommitDate = this.commitDate
+            }
+        };
+
+        var configuration = GitFlowConfigurationBuilder.New
+            .WithTagPreReleaseWeight(0)
+            .WithAssemblyInformationalFormat("{Major}.{Minor}.{Patch}-{VersionSourceDistance:0000}")
+            .Build();
+        var effectiveConfiguration = configuration.GetEffectiveConfiguration();
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, effectiveConfiguration);
+
+        variables.InformationalVersion.ShouldBe("1.2.3-0042");
+    }
+
+    [TestCase(null)]
+    [TestCase("semantic-source-sha")]
+    public void SeparateSourcesSurviveFormattingEnumerationAndJson(string? semanticSourceSha)
+    {
+        var semanticVersion = new SemanticVersion(5, 0, 0)
+        {
+            BuildMetaData = new()
+            {
+                SemVerSourceSemVer = new(5, 0, 0),
+                SemVerSourceSha = semanticSourceSha,
+                SemVerSourceIncrement = VersionField.Minor,
+                VersionSourceSemVer = new(1, 0, 0),
+                VersionSourceSha = "count-source-sha",
+                VersionSourceDistance = 2,
+                VersionSourceIncrement = VersionField.None,
+                Sha = "head-sha"
+            }
+        };
+        var configuration = GitFlowConfigurationBuilder.New
+            .WithAssemblyInformationalFormat("{SemVerSourceSemVer}-{SemVerSourceIncrement}+{CommitCountSourceDistance:000}")
+            .Build();
+
+        var variables = this.variableProvider.GetVariablesFor(semanticVersion, configuration, configuration.GetEffectiveConfiguration());
+        variables.InformationalVersion.ShouldBe("5.0.0-Minor+002");
+        variables.TryGetValue("SemVerSourceSha", out var enumeratedSource).ShouldBeTrue();
+        enumeratedSource.ShouldBe(semanticSourceSha);
+        variables.Single(pair => pair.Key == "CommitCountSourceSha").Value.ShouldBe("count-source-sha");
+
+        var json = variables.ToJson();
+        using var document = System.Text.Json.JsonDocument.Parse(json);
+        document.RootElement.GetProperty("CommitCountSourceDistance").GetInt64().ShouldBe(2);
+        document.RootElement.GetProperty("SemVerSourceSha").GetString().ShouldBe(semanticSourceSha);
+        var roundTrip = json.ToGitVersionVariables();
+        roundTrip.SemVerSourceSemVer.ShouldBe("5.0.0");
+        roundTrip.SemVerSourceSha.ShouldBe(semanticSourceSha);
+        roundTrip.SemVerSourceIncrement.ShouldBe("Minor");
+        roundTrip.CommitCountSourceSha.ShouldBe("count-source-sha");
+        roundTrip.CommitCountSourceDistance.ShouldBe("2");
+        roundTrip.VersionSourceSemVer.ShouldBe("1.0.0");
+        roundTrip.VersionSourceIncrement.ShouldBe("None");
+        roundTrip.Sha.ShouldBe("head-sha");
+    }
+
+    [Test]
+    public void CopyingEnumeratedVariablesDoesNotReuseOldSourceValues()
+    {
+        var configuration = GitFlowConfigurationBuilder.New.Build();
+        var original = this.variableProvider.GetVariablesFor(new SemanticVersion(1, 0, 0), configuration, configuration.GetEffectiveConfiguration());
+        original.TryGetValue("SemVerSourceSha", out _).ShouldBeTrue();
+
+        var copy = original with { SemVerSourceSha = "updated-source", VersionSourceDistance = "3" };
+
+        copy.TryGetValue("SemVerSourceSha", out var source).ShouldBeTrue();
+        source.ShouldBe("updated-source");
+        copy.Single(pair => pair.Key == "CommitCountSourceDistance").Value.ShouldBe("3");
+        original.SemVerSourceSha.ShouldBeNull();
+    }
+}

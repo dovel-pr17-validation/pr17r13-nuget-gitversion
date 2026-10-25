@@ -1,0 +1,26 @@
+<Solution>
+  <Folder Name="/scripts/">
+    <File Path="../tests/scripts/test-global-tool.sh" />
+    <File Path="../tests/scripts/test-msbuild-task.sh" />
+    <File Path="../tests/scripts/test-native-tool.sh" />
+  </Folder>
+  <Folder Name="/sln/">
+    <File Path="../.config/dotnet-tools.json" />
+    <File Path="../.gitignore" />
+    <File Path="../.remarkrc.yaml" />
+    <File Path="../global.json" />
+    <File Path="../qodana.yaml" />
+    <File Path="../package.json" />
+    <File Path="../src/mark-shipped.ps1" />
+    <File Path="Directory.Build.props" />
+    <File Path="Directory.Packages.props" />
+  </Folder>
+  <Project Path="artifacts/artifacts.csproj" />
+  <Project Path="build/build.csproj" />
+  <Project Path="common/common.csproj" />
+  <Project Path="config/config.csproj" />
+  <Project Path="docker/docker.csproj" />
+  <Project Path="docs/docs.csproj" />
+  <Project Path="publish/publish.csproj" />
+  <Project Path="release/release.csproj" />
+</Solution>
