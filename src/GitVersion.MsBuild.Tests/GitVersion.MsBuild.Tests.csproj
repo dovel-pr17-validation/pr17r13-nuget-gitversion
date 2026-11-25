@@ -14,6 +14,7 @@
         <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
         <PackageReference Include="Microsoft.CodeAnalysis.VisualBasic" />
         <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+        <PackageReference Include="Microsoft.Extensions.FileSystemGlobbing" />
         <PackageReference Include="Microsoft.IO.Redist" />
         <PackageReference Include="MSBuild.ProjectCreation" />
         <PackageReference Include="NuGet.Frameworks" />
